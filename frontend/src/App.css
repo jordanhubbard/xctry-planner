@@ -1,5 +1,7 @@
-.App {
-  text-align: center;
+body, .App {
+  background: #232733;
+  color: #f5f6fa;
+  font-family: 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Helvetica Neue', Arial, sans-serif;
 }
 
 .App-logo {
@@ -14,14 +16,14 @@
 }
 
 .App-header {
-  background-color: #282c34;
+  background: none;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
+  justify-content: flex-start;
+  font-size: 1.1rem;
+  color: #f5f6fa;
 }
 
 .App-link {
@@ -40,4 +42,74 @@
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
+}
+
+input, select {
+  background: #232733;
+  color: #f5f6fa;
+  border: 1.5px solid #3a405a;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 16px;
+  transition: border 0.2s, box-shadow 0.2s;
+}
+input:focus, select:focus {
+  border-color: #2e7dff;
+  outline: none;
+  box-shadow: 0 0 0 2px #2e7dff33;
+}
+
+button {
+  background: #2e7dff;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 600;
+  padding: 12px 24px;
+  box-shadow: 0 2px 8px rgba(30,60,180,0.08);
+  cursor: pointer;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+button:hover, button:focus {
+  background: #1b4fa0;
+  box-shadow: 0 4px 16px rgba(30,60,180,0.13);
+}
+
+th, td {
+  padding: 10px 14px;
+  text-align: center;
+}
+table {
+  border-collapse: separate;
+  border-spacing: 0;
+  background: #232733;
+  color: #f5f6fa;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(30,60,180,0.07);
+  margin-bottom: 1em;
+}
+thead {
+  background: #2e3448;
+}
+tbody tr:nth-child(even) {
+  background: #262b3a;
+}
+tbody tr:hover {
+  background: #2e7dff22;
+}
+
+label {
+  font-weight: 500;
+  color: #bfc7d5;
+}
+
+.spinner {
+  display: inline-block;
+  width: 40px;
+  height: 40px;
+  border: 5px solid #3a405a;
+  border-top: 5px solid #2e7dff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
 }

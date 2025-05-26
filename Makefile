@@ -20,7 +20,7 @@ restart: down clean build up
 
 # Run backend tests inside the backend container
 test-backend:
-	docker compose exec backend pytest test_main.py
+	docker compose exec backend pytest
 
 # Run frontend tests inside the frontend container
 test-frontend:

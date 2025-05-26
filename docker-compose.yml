@@ -11,6 +11,9 @@ services:
       - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
       - OPENAIP_API_KEY=${OPENAIP_API_KEY}
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   frontend:
     build: ./frontend

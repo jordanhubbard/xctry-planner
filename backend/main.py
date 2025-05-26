@@ -7,8 +7,12 @@ import os
 import requests
 import math
 import httpx
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, shape
 from fastapi.middleware.cors import CORSMiddleware
+import json
+from typing import List, Tuple, Dict
+import asyncio
+from functools import lru_cache
 
 app = FastAPI()
 
@@ -21,39 +25,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load and cache the airports database
-AIRPORTS_CSV = os.path.join(os.path.dirname(__file__), 'airports.csv')
-airports_df = pd.read_csv(AIRPORTS_CSV, low_memory=False)
-airports_df = airports_df.set_index('ident')
+# Load OpenAIP airports
+AIRPORTS_JSON = os.path.join(os.path.dirname(__file__), 'airports_us.json')
+with open(AIRPORTS_JSON, 'r') as f:
+    airports_data = json.load(f)
+# Build DataFrame for fast lookup
+airports_df = pd.DataFrame(airports_data)
+airports_df = airports_df.set_index('_id', drop=False)
 
-# Load and cache the Swiss airspace GeoJSON
-AIRSPACES_GEOJSON = os.path.join(os.path.dirname(__file__), 'airspaces_ch.geojson')
-airspaces_gdf = gpd.read_file(AIRSPACES_GEOJSON)
+# Build code lookup tables for ident, gps_code, local_code
+code_to_row = {}
+for _, row in airports_df.iterrows():
+    for code in [row.get('icaoCode'), row.get('gpsCode'), row.get('localCode'), row.get('id')]:
+        if code and isinstance(code, str):
+            code_to_row[code.upper()] = row
+
+# Load OpenAIP airspaces
+AIRSPACES_JSON = os.path.join(os.path.dirname(__file__), 'airspaces_us.json')
+with open(AIRSPACES_JSON, 'r') as f:
+    airspaces_data = json.load(f)
+# Convert to GeoDataFrame
+features = []
+for asp in airspaces_data:
+    if 'geometry' in asp and asp['geometry']:
+        try:
+            features.append({
+                'geometry': shape(asp['geometry']),
+                'name': asp.get('name'),
+                'class': asp.get('category'),
+                'type': asp.get('type'),
+                'id': asp.get('id'),
+            })
+        except Exception:
+            continue
+if features:
+    airspaces_gdf = gpd.GeoDataFrame(features, crs="EPSG:4326")
+else:
+    airspaces_gdf = gpd.GeoDataFrame([], crs="EPSG:4326")
 
 OPENWEATHERMAP_API_KEY = os.environ.get('OPENWEATHERMAP_API_KEY', '')
 
 def get_airport_info(icao):
     code = icao.upper()
-    # Try ident, gps_code, local_code
-    try:
-        if code in airports_df.index:
-            row = airports_df.loc[code]
-        else:
-            # Search gps_code and local_code columns
-            match = airports_df[(airports_df['gps_code'].str.upper() == code) | (airports_df['local_code'].str.upper() == code)]
-            if not match.empty:
-                row = match.iloc[0]
-            else:
-                return {"error": f"Airport {icao} not found"}
+    row = code_to_row.get(code)
+    if row is not None:
         return {
-            "icao": row.get('ident', code),
-            "name": row['name'],
-            "lat": row['latitude_deg'],
-            "lon": row['longitude_deg'],
-            "elevation": row['elevation_ft']
+            "icao": row.get('icaoCode', code),
+            "name": row.get('name', code),
+            "lat": row['geometry']['coordinates'][1],
+            "lon": row['geometry']['coordinates'][0],
+            "elevation": row.get('elevation', 0)
         }
-    except Exception:
-        return {"error": f"Airport {icao} not found"}
+    return {"error": f"Airport {icao} not found"}
 
 @app.get("/")
 def read_root():
@@ -73,6 +96,148 @@ class RouteRequest(BaseModel):
     avoid_terrain: bool
     max_leg_distance: float = 150.0  # nm, default value
 
+def is_public_open_airport(row):
+    # OpenAIP: 'private' == False for public-use
+    if row.get('private', True):
+        print(f"Skipping {row.get('name')} ({row.get('icaoCode')}) - private")
+        return False
+    # Ignore 'status' check (not present in OpenAIP)
+    runways = row.get('runways', [])
+    # Fix: handle NaN or non-list runways
+    if not isinstance(runways, list):
+        runways = []
+    for rwy in runways:
+        try:
+            length = rwy.get('dimension', {}).get('length', {}).get('value', 0)
+            surface = rwy.get('surface', {}).get('mainComposite', None)
+            # OpenAIP: 0=asphalt, 1=concrete, 2=paved, 4=bitumen
+            if length >= 610 and surface in [0, 1, 2, 4]:
+                return True
+        except Exception as e:
+            print(f"Error checking runway: {e}")
+            continue
+    print(f"Skipping {row.get('name')} ({row.get('icaoCode')}) - no suitable runway")
+    return False
+
+def find_nearest_airport(lat, lon, exclude_codes):
+    min_dist = float('inf')
+    nearest = None
+    for code, row in code_to_row.items():
+        if code in exclude_codes:
+            continue
+        if not is_public_open_airport(row):
+            continue
+        coords = row['geometry']['coordinates']
+        alat, alon = coords[1], coords[0]
+        dist = haversine(lat, lon, alat, alon)
+        if dist < min_dist:
+            min_dist = dist
+            nearest = (alat, alon, code, row.get('name', code))
+    return nearest
+
+def avoid_airspaces(route_points: List[Tuple[float, float]], buffer_nm=5.0) -> List[Tuple[float, float]]:
+    # Iteratively add detours until no segment intersects any airspace
+    changed = True
+    max_iter = 10
+    iter_count = 0
+    while changed and iter_count < max_iter:
+        changed = False
+        new_points = [route_points[0]]
+        for i in range(len(route_points) - 1):
+            seg = LineString([(route_points[i][1], route_points[i][0]), (route_points[i+1][1], route_points[i+1][0])])
+            intersecting = airspaces_gdf[airspaces_gdf.intersects(seg)]
+            if not intersecting.empty:
+                # Find the first airspace, add a detour just outside its boundary
+                asp = intersecting.iloc[0]
+                boundary = asp.geometry.boundary
+                # Find closest point on boundary to segment midpoint
+                mid = seg.interpolate(0.5, normalized=True)
+                closest = boundary.interpolate(boundary.project(mid))
+                # Offset detour by buffer_nm (approx 0.0167 deg per nm)
+                offset_lat = closest.y + buffer_nm * 0.0167
+                offset_lon = closest.x + buffer_nm * 0.0167
+                new_points.append((offset_lat, offset_lon))
+                new_points.append(route_points[i+1])
+                changed = True
+                break
+            else:
+                new_points.append(route_points[i+1])
+        if changed:
+            route_points = new_points
+        iter_count += 1
+    return route_points
+
+async def fetch_elevation_batch(points: List[Tuple[float, float]], client, cache: Dict) -> Dict[Tuple[float, float], float]:
+    # Fetch elevations for all points, using cache where possible
+    results = {}
+    tasks = []
+    for lat, lon in points:
+        key = (round(lat, 5), round(lon, 5))
+        if key in cache:
+            results[key] = cache[key]
+        else:
+            url = f"https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&south={lat}&north={lat}&west={lon}&east={lon}&outputFormat=JSON"
+            tasks.append((key, client.get(url, timeout=5)))
+    if tasks:
+        responses = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
+        for (key, _), resp in zip(tasks, responses):
+            elev = 0
+            try:
+                if isinstance(resp, Exception):
+                    elev = 0
+                elif resp.status_code == 200:
+                    j = resp.json()
+                    elev = j['data'][0][2] if 'data' in j and j['data'] else 0
+            except Exception:
+                elev = 0
+            results[key] = elev
+            cache[key] = elev
+    return results
+
+def get_leg_sample_points(lat1, lon1, lat2, lon2, interval_nm=10) -> List[Tuple[float, float]]:
+    n_samples = max(2, int(haversine(lat1, lon1, lat2, lon2) // interval_nm) + 1)
+    return [(
+        lat1 + (i / (n_samples - 1)) * (lat2 - lat1),
+        lon1 + (i / (n_samples - 1)) * (lon2 - lon1)
+    ) for i in range(n_samples)]
+
+async def get_all_leg_vfr_altitudes(legs: List[Tuple[Tuple[float, float], Tuple[float, float]]], min_vfr_alt=3500, step=1000) -> List[int]:
+    # Collect all sample points
+    all_points = []
+    for (lat1, lon1), (lat2, lon2) in legs:
+        all_points.extend(get_leg_sample_points(lat1, lon1, lat2, lon2))
+    # Remove duplicates
+    all_points = list({(round(lat, 5), round(lon, 5)) for lat, lon in all_points})
+    cache = {}
+    async with httpx.AsyncClient() as client:
+        elevations = await fetch_elevation_batch(all_points, client, cache)
+    # Now calculate per-leg VFR altitudes
+    vfr_alts = []
+    for (lat1, lon1), (lat2, lon2) in legs:
+        samples = get_leg_sample_points(lat1, lon1, lat2, lon2)
+        max_terrain = 0
+        max_airspace_floor = 0
+        for lat, lon in samples:
+            key = (round(lat, 5), round(lon, 5))
+            elev = elevations.get(key, 0)
+            if elev > max_terrain:
+                max_terrain = elev
+            pt = Point(lon, lat)
+            intersecting = airspaces_gdf[airspaces_gdf.contains(pt)]
+            for _, asp in intersecting.iterrows():
+                floor = asp.get('lowerLimit', 0)
+                if isinstance(floor, str):
+                    try:
+                        floor = int(floor.replace('ft', '').replace(' ', ''))
+                    except Exception:
+                        floor = 0
+                if floor > max_airspace_floor:
+                    max_airspace_floor = floor
+        needed = max(max_terrain + 1000, max_airspace_floor + 500)
+        vfr = max(min_vfr_alt, int((needed + step - 1) // step * step))
+        vfr_alts.append(vfr)
+    return vfr_alts
+
 @app.post("/route")
 def calculate_route(req: RouteRequest):
     origin_info = get_airport_info(req.origin)
@@ -90,71 +255,20 @@ def calculate_route(req: RouteRequest):
         (dest_info['lat'], dest_info['lon'])
     ]
     route_names = [req.origin.upper(), req.destination.upper()]
-    detour_added = False
 
-    # Airspace avoidance (simple: if direct line intersects any airspace, add a midpoint detour)
+    # Airspace avoidance (iterative)
     if req.avoid_airspaces:
-        line = LineString([(p[1], p[0]) for p in route_points])  # (lon, lat)
-        intersecting = airspaces_gdf[airspaces_gdf.intersects(line)]
-        if not intersecting.empty:
-            largest = intersecting.iloc[intersecting.area.argmax()]
-            centroid = largest.geometry.centroid
-            detour = (centroid.y + 0.2, centroid.x + 0.2)  # Offset by ~20nm for demo
-            route_points.insert(1, detour)
-            route_names.insert(1, "DETOUR")
-            detour_added = True
-
-    # Terrain avoidance (simple: if max terrain > cruise altitude, add midpoint detour)
-    if req.avoid_terrain:
-        mid_lat = (route_points[0][0] + route_points[-1][0]) / 2
-        mid_lon = (route_points[0][1] + route_points[-1][1]) / 2
-        try:
-            import httpx
-            import asyncio
-            async def get_elev():
-                async with httpx.AsyncClient() as client:
-                    url = f"https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&south={mid_lat}&north={mid_lat}&west={mid_lon}&east={mid_lon}&outputFormat=JSON"
-                    resp = await client.get(url, timeout=5)
-                    if resp.status_code == 200:
-                        j = resp.json()
-                        return j['data'][0][2] if 'data' in j and j['data'] else 0
-                    return 0
-            elev = asyncio.run(get_elev())
-        except Exception:
-            elev = 0
-        if elev and req.altitude and elev > req.altitude - 1000:
-            detour = (mid_lat + 0.2, mid_lon)
-            if not detour_added:
-                route_points.insert(1, detour)
-                route_names.insert(1, "DETOUR")
+        route_points = avoid_airspaces(route_points)
+        # Insert detour names for each detour
+        route_names = [req.origin.upper()] + ["DETOUR"] * (len(route_points) - 2) + [req.destination.upper()]
 
     # Diversion logic: break up long legs with overflown airports
-    def find_nearest_airport(lat, lon, exclude_idents):
-        # Find nearest public-use airport (large, medium, small) not in exclude_idents
-        def is_valid_airport(ident, row):
-            return (
-                ident not in exclude_idents
-                and row.get('type', '').startswith(('large_airport', 'medium_airport', 'small_airport'))
-                and row.get('scheduled_service', 'no') != 'closed'
-            )
-        dists = ((row['latitude_deg'], row['longitude_deg'], ident)
-                 for ident, row in airports_df.iterrows()
-                 if is_valid_airport(ident, row))
-        min_dist = float('inf')
-        nearest = None
-        for alat, alon, ident in dists:
-            dist = haversine(lat, lon, alat, alon)
-            if dist < min_dist:
-                min_dist = dist
-                nearest = (alat, alon, ident)
-        return nearest
-
     max_leg = req.max_leg_distance
     i = 0
     overflown_airports = []
     overflown_coords = []
     overflown_names = []
-    exclude_idents = set([req.origin.upper(), req.destination.upper()])
+    exclude_codes = set([req.origin.upper(), req.destination.upper()])
     while i < len(route_points) - 1:
         lat1, lon1 = route_points[i]
         lat2, lon2 = route_points[i+1]
@@ -163,33 +277,33 @@ def calculate_route(req: RouteRequest):
             # Insert nearest airport to midpoint
             mid_lat = (lat1 + lat2) / 2
             mid_lon = (lon1 + lon2) / 2
-            nearest = find_nearest_airport(mid_lat, mid_lon, exclude_idents)
+            nearest = find_nearest_airport(mid_lat, mid_lon, exclude_codes)
             if nearest:
-                alat, alon, ident = nearest
+                alat, alon, code, name = nearest
                 route_points.insert(i+1, (alat, alon))
-                route_names.insert(i+1, ident)
-                overflown_airports.append(ident)
+                route_names.insert(i+1, code)
+                overflown_airports.append(code)
                 overflown_coords.append([alat, alon])
-                overflown_names.append(airports_df.loc[ident]['name'])
-                exclude_idents.add(ident)
-                # Do not increment i, check new leg
+                overflown_names.append(name)
+                exclude_codes.add(code)
                 continue
         i += 1
 
-    # Build route segments with type
+    # Build route segments with type and per-leg VFR altitude (async)
+    legs = [(route_points[i], route_points[i+1]) for i in range(len(route_points) - 1)]
+    vfr_alts = asyncio.run(get_all_leg_vfr_altitudes(legs))
     segments = []
-    for i in range(len(route_points) - 1):
+    for i, ((start, end), vfr_alt) in enumerate(zip(legs, vfr_alts)):
         seg_type = 'cruise'
         if i == 0:
             seg_type = 'climb'
-        elif i == len(route_points) - 2:
+        elif i == len(legs) - 1:
             seg_type = 'descent'
-        if detour_added and i == 0:
-            seg_type = 'airspace' if req.avoid_airspaces else 'terrain'
         segments.append({
-            'start': route_points[i],
-            'end': route_points[i+1],
-            'type': seg_type
+            'start': start,
+            'end': end,
+            'type': seg_type,
+            'vfr_altitude': vfr_alt
         })
 
     # Calculate total distance and time
