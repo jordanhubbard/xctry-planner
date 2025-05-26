@@ -9,6 +9,7 @@ services:
       - ./backend:/app
     environment:
       - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
+      - OPENAIP_API_KEY=${OPENAIP_API_KEY}
     restart: unless-stopped
 
   frontend:
