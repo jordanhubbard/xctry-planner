@@ -16,6 +16,8 @@ up run:
 logs:
 	docker compose logs -f
 
+restart: down clean build up
+
 # Run backend tests inside the backend container
 test-backend:
 	docker compose exec backend pytest test_main.py

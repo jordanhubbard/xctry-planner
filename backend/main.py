@@ -57,6 +57,7 @@ class RouteRequest(BaseModel):
     origin: str
     destination: str
     speed: float
+    speed_unit: str = 'knots'
     altitude: int
     avoid_airspaces: bool
     avoid_terrain: bool
@@ -68,6 +69,10 @@ def calculate_route(req: RouteRequest):
     dest_info = get_airport_info(req.destination)
     if 'error' in origin_info or 'error' in dest_info:
         return {"error": "Invalid origin or destination ICAO code"}
+
+    speed = req.speed
+    if req.speed_unit == 'mph':
+        speed = speed * 0.868976
 
     # Build initial direct route
     route_points = [
@@ -175,7 +180,7 @@ def calculate_route(req: RouteRequest):
     total_dist = 0
     for i in range(len(route_points) - 1):
         total_dist += haversine(route_points[i][0], route_points[i][1], route_points[i+1][0], route_points[i+1][1])
-    total_time = total_dist / req.speed if req.speed else 0
+    total_time = total_dist / speed if speed else 0
 
     return {
         "route": route_names,

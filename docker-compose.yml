@@ -8,7 +8,7 @@ services:
     volumes:
       - ./backend:/app
     environment:
-      - OPENWEATHERMAP_API_KEY=your_api_key_here
+      - OPENWEATHERMAP_API_KEY=***REMOVED***
     restart: unless-stopped
 
   frontend:

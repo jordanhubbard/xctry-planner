@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import './App.css';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, Polygon, useMapEvent } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, Polygon, useMapEvent, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 
@@ -88,12 +88,58 @@ const SEGMENT_COLORS = {
   terrain: 'brown',
 };
 
+// Weather category function
+function getWeatherCategory(wx) {
+  if (!wx || !wx.weather || !wx.main) return { cat: 'Unknown', color: 'gray' };
+  // Visibility in meters, convert to sm
+  const vis = wx.visibility ? wx.visibility / 1609.34 : null;
+  // Find lowest cloud base (if any)
+  let ceiling = null;
+  if (wx.clouds && wx.clouds.all !== undefined) {
+    // OpenWeatherMap does not provide cloud base directly, so we can't get true ceiling
+    // For demo, treat scattered/broken/overcast as 1500 ft if clouds.all > 40, else 5000 ft
+    ceiling = wx.clouds.all > 40 ? 1500 : 5000;
+  }
+  // VFR: ceiling > 3000 ft and vis > 5sm
+  // MVFR: ceiling 1000-3000 or vis 3-5
+  // IFR: ceiling 500-1000 or vis 1-3
+  // LIFR: ceiling < 500 or vis < 1
+  if ((ceiling === null || ceiling > 3000) && vis !== null && vis > 5) return { cat: 'VFR', color: 'green' };
+  if ((ceiling !== null && ceiling > 1000 && ceiling <= 3000) || (vis !== null && vis > 3 && vis <= 5)) return { cat: 'MVFR', color: 'blue' };
+  if ((ceiling !== null && ceiling > 500 && ceiling <= 1000) || (vis !== null && vis > 1 && vis <= 3)) return { cat: 'IFR', color: 'red' };
+  if ((ceiling !== null && ceiling <= 500) || (vis !== null && vis <= 1)) return { cat: 'LIFR', color: 'magenta' };
+  return { cat: 'Unknown', color: 'gray' };
+}
+
+// Fit map to route bounds when route changes
+function FitRouteBounds({ routeResult }) {
+  const map = useMap();
+  React.useEffect(() => {
+    if (routeResult && routeResult.origin_coords && routeResult.destination_coords) {
+      const points = [routeResult.origin_coords, ...(routeResult.overflown_coords || []), routeResult.destination_coords];
+      if (points.length > 1) {
+        const bounds = L.latLngBounds(points.map(([lat, lon]) => [lat, lon]));
+        map.fitBounds(bounds.pad(0.25), { animate: true });
+      }
+    }
+  }, [routeResult, map]);
+  return null;
+}
+
+function getRecommendedVFRAltitude(heading, minAltitude) {
+  // Odd thousands + 500 for 0-179, even + 500 for 180-359
+  let base = heading < 180 ? 3500 : 4500;
+  while (base < minAltitude) base += 2000;
+  return base;
+}
+
 function App() {
   const [backendMsg, setBackendMsg] = useState('');
   const [form, setForm] = useState({
     origin: '',
     destination: '',
     speed: '',
+    speed_unit: 'knots',
     altitude: '',
     avoid_airspaces: false,
     avoid_terrain: false,
@@ -108,6 +154,9 @@ function App() {
   const [terrainProfile, setTerrainProfile] = useState([]);
   const [terrainLoading, setTerrainLoading] = useState(false);
   const [terrainError, setTerrainError] = useState(null);
+  const [selectedLeg, setSelectedLeg] = useState(null);
+  const [legPopup, setLegPopup] = useState(null);
+  const [legLoading, setLegLoading] = useState(false);
 
   useEffect(() => {
     fetch('http://localhost:8000/')
@@ -294,20 +343,63 @@ function App() {
     );
   }
 
-  // Color-coded route segments
+  // Color-coded route segments (now clickable)
   let segmentPolylines = [];
   if (routeResult && routeResult.segments) {
-    segmentPolylines = routeResult.segments.map((seg, i) => (
-      <Polyline
-        key={i}
-        positions={[
-          [seg.start[0], seg.start[1]],
-          [seg.end[0], seg.end[1]]
-        ]}
-        color={SEGMENT_COLORS[seg.type] || 'lime'}
-        weight={5}
-      />
-    ));
+    segmentPolylines = routeResult.segments.map((seg, i) => {
+      const from = seg.start;
+      const to = seg.end;
+      const mid = [(from[0] + to[0]) / 2, (from[1] + to[1]) / 2];
+      return (
+        <Polyline
+          key={i}
+          positions={[[from[0], from[1]], [to[0], to[1]]]}
+          color={SEGMENT_COLORS[seg.type] || 'lime'}
+          weight={5}
+          eventHandlers={{
+            click: async () => {
+              setLegLoading(true);
+              const course = calculateCourse(from[0], from[1], to[0], to[1]);
+              const magVar = 13; // Demo: fixed 13°W for CONUS
+              let magHeading = course - magVar;
+              if (magHeading < 0) magHeading += 360;
+              let minAlt = 0;
+              let terrainMsg = '';
+              if (form.avoid_terrain) {
+                // Fetch terrain profile for this leg
+                try {
+                  const res = await fetch('http://localhost:8000/terrain-profile', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ points: [from, to] }),
+                  });
+                  const data = await res.json();
+                  const maxElev = Math.max(...data.map(p => p.elevation || 0));
+                  minAlt = maxElev + 1000;
+                  terrainMsg = `Highest terrain: ${maxElev.toFixed(0)} ft. Must cruise at least ${minAlt.toFixed(0)} ft.`;
+                } catch {
+                  terrainMsg = 'Could not fetch terrain info.';
+                }
+              }
+              const vfrAlt = getRecommendedVFRAltitude(magHeading, minAlt);
+              setLegPopup({
+                lat: mid[0],
+                lon: mid[1],
+                content: (
+                  <div style={{ minWidth: 200 }}>
+                    <b>Leg {i + 1}</b><br />
+                    Magnetic Heading: {magHeading.toFixed(0)}°<br />
+                    Recommended VFR Altitude: {vfrAlt.toFixed(0)} ft<br />
+                    {terrainMsg && <span>{terrainMsg}<br /></span>}
+                  </div>
+                )
+              });
+              setLegLoading(false);
+            }
+          }}
+        />
+      );
+    });
   }
 
   // Overflown airport markers (diversion airports)
@@ -323,79 +415,186 @@ function App() {
     ));
   }
 
+  // Weather status dots for each airport
+  let airportWeatherMarkers = [];
+  if (weather && routeResult && routeResult.origin_coords && routeResult.destination_coords) {
+    // Origin
+    const originWx = weather.origin_weather;
+    const { cat: originCat, color: originColor } = getWeatherCategory(originWx);
+    airportWeatherMarkers.push(
+      <Marker key="origin-wx" position={routeResult.origin_coords} icon={L.divIcon({ className: '', html: `<svg width='18' height='18'><circle cx='9' cy='9' r='7' fill='${originColor}' stroke='black' stroke-width='2'/></svg>` })}>
+        <Popup>
+          {weather.origin} Weather: {originCat}
+        </Popup>
+      </Marker>
+    );
+    // Destination
+    const destWx = weather.destination_weather;
+    const { cat: destCat, color: destColor } = getWeatherCategory(destWx);
+    airportWeatherMarkers.push(
+      <Marker key="dest-wx" position={routeResult.destination_coords} icon={L.divIcon({ className: '', html: `<svg width='18' height='18'><circle cx='9' cy='9' r='7' fill='${destColor}' stroke='black' stroke-width='2'/></svg>` })}>
+        <Popup>
+          {weather.destination} Weather: {destCat}
+        </Popup>
+      </Marker>
+    );
+    // Overflown airports (if any, and if weather data available)
+    if (routeResult.overflown_coords && routeResult.overflown_airports) {
+      routeResult.overflown_coords.forEach((coords, i) => {
+        // For demo, use origin weather for all (real: fetch each airport's weather)
+        const { cat, color } = getWeatherCategory(originWx);
+        airportWeatherMarkers.push(
+          <Marker key={`overflown-wx-${i}`} position={coords} icon={L.divIcon({ className: '', html: `<svg width='18' height='18'><circle cx='9' cy='9' r='7' fill='${color}' stroke='black' stroke-width='2'/></svg>` })}>
+            <Popup>
+              {routeResult.overflown_airports[i]} Weather: {cat}
+            </Popup>
+          </Marker>
+        );
+      });
+    }
+  }
+
+  // Add a marker for the selected leg popup
+  let legPopupMarker = null;
+  if (legPopup) {
+    legPopupMarker = (
+      <Marker position={[legPopup.lat, legPopup.lon]} icon={L.divIcon({ className: '', html: `<svg width='1' height='1'></svg>` })}>
+        <Popup position={[legPopup.lat, legPopup.lon]} onClose={() => setLegPopup(null)}>
+          {legLoading ? 'Loading...' : legPopup.content}
+        </Popup>
+      </Marker>
+    );
+  }
+
   return (
     <div className="App">
       <header className="App-header">
         <h1>Cross Country Flight Planner</h1>
-        <p>Backend says: {backendMsg}</p>
-        <form onSubmit={handleSubmit} style={{ margin: '2em 0' }}>
-          <input
-            name="origin"
-            placeholder="Origin ICAO"
-            value={form.origin}
-            onChange={handleChange}
-            required
-            style={{ marginRight: 8 }}
-          />
-          <input
-            name="destination"
-            placeholder="Destination ICAO"
-            value={form.destination}
-            onChange={handleChange}
-            required
-            style={{ marginRight: 8 }}
-          />
-          <input
-            name="speed"
-            placeholder="Speed (knots or mph)"
-            value={form.speed}
-            onChange={handleChange}
-            type="number"
-            required
-            style={{ marginRight: 8, width: 120 }}
-          />
-          <input
-            name="altitude"
-            placeholder="Cruise Altitude (ft)"
-            value={form.altitude}
-            onChange={handleChange}
-            type="number"
-            required
-            style={{ marginRight: 8, width: 160 }}
-          />
-          <input
-            name="max_leg_distance"
-            placeholder="Max leg distance (nm)"
-            value={form.max_leg_distance}
-            onChange={handleChange}
-            type="number"
-            min={50}
-            max={500}
-            step={10}
-            required
-            style={{ marginRight: 8, width: 180 }}
-            title="Maximum distance between diversion airports (nm)"
-          />
-          <label style={{ marginRight: 8 }}>
-            <input
-              name="avoid_airspaces"
-              type="checkbox"
-              checked={form.avoid_airspaces}
-              onChange={handleChange}
-            />{' '}
-            Avoid airspaces
-          </label>
-          <label style={{ marginRight: 8 }}>
-            <input
-              name="avoid_terrain"
-              type="checkbox"
-              checked={form.avoid_terrain}
-              onChange={handleChange}
-            />{' '}
-            Avoid high terrain
-          </label>
-          <button type="submit">Plan Route</button>
-        </form>
+        {backendMsg !== 'Backend is running' && (
+          <p>Backend says: {backendMsg}</p>
+        )}
+        <div style={{
+          background: 'rgba(30, 32, 40, 0.95)',
+          padding: '2em',
+          borderRadius: 16,
+          boxShadow: '0 4px 24px rgba(0,0,0,0.15)',
+          maxWidth: 1100,
+          margin: '2em auto 1em auto',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+        }}>
+          <form onSubmit={handleSubmit} style={{ width: '100%' }}>
+            <div style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 24,
+              alignItems: 'flex-end',
+              justifyContent: 'center',
+            }}>
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 160 }}>
+                <label htmlFor="origin" style={{ fontWeight: 500, marginBottom: 6 }}>Origin</label>
+                <input
+                  id="origin"
+                  name="origin"
+                  placeholder="e.g. KJFK"
+                  value={form.origin}
+                  onChange={handleChange}
+                  required
+                  style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #888', fontSize: 16 }}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 160 }}>
+                <label htmlFor="destination" style={{ fontWeight: 500, marginBottom: 6 }}>Destination</label>
+                <input
+                  id="destination"
+                  name="destination"
+                  placeholder="e.g. KBOS"
+                  value={form.destination}
+                  onChange={handleChange}
+                  required
+                  style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #888', fontSize: 16 }}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 160 }}>
+                <label htmlFor="speed" style={{ fontWeight: 500, marginBottom: 6 }}>Speed</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    id="speed"
+                    name="speed"
+                    placeholder="e.g. 120"
+                    value={form.speed}
+                    onChange={handleChange}
+                    type="number"
+                    required
+                    style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #888', fontSize: 16, width: 100 }}
+                  />
+                  <select name="speed_unit" value={form.speed_unit} onChange={handleChange} style={{ padding: '8px', borderRadius: 6, border: '1px solid #888', fontSize: 15 }}>
+                    <option value="knots">knots</option>
+                    <option value="mph">mph</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 180 }}>
+                <label htmlFor="altitude" style={{ fontWeight: 500, marginBottom: 6 }}>Cruise Altitude</label>
+                <input
+                  id="altitude"
+                  name="altitude"
+                  placeholder="feet"
+                  value={form.altitude}
+                  onChange={handleChange}
+                  type="number"
+                  required
+                  style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #888', fontSize: 16 }}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 180 }}>
+                <label htmlFor="max_leg_distance" style={{ fontWeight: 500, marginBottom: 6 }}>Max Leg Distance</label>
+                <input
+                  id="max_leg_distance"
+                  name="max_leg_distance"
+                  placeholder="nm"
+                  value={form.max_leg_distance}
+                  onChange={handleChange}
+                  type="number"
+                  min={50}
+                  max={500}
+                  step={10}
+                  required
+                  style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #888', fontSize: 16 }}
+                  title="Maximum distance between diversion airports (nm)"
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 180, marginTop: 18 }}>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <label style={{ fontWeight: 400, fontSize: 15 }}>
+                    <input
+                      name="avoid_airspaces"
+                      type="checkbox"
+                      checked={form.avoid_airspaces}
+                      onChange={handleChange}
+                      style={{ marginRight: 6 }}
+                    />
+                    Avoid airspaces
+                  </label>
+                  <label style={{ fontWeight: 400, fontSize: 15 }}>
+                    <input
+                      name="avoid_terrain"
+                      type="checkbox"
+                      checked={form.avoid_terrain}
+                      onChange={handleChange}
+                      style={{ marginRight: 6 }}
+                    />
+                    Avoid high terrain
+                  </label>
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minWidth: 120, marginTop: 18 }}>
+                <button type="submit" style={{ padding: '12px 24px', borderRadius: 6, fontSize: 16, fontWeight: 600, background: '#2e7dff', color: 'white', border: 'none', boxShadow: '0 2px 8px rgba(30,60,180,0.08)', cursor: 'pointer' }}>Plan Route</button>
+              </div>
+            </div>
+          </form>
+        </div>
         <button onClick={fetchWeather} disabled={weatherLoading || !form.origin || !form.destination} style={{ marginBottom: 16 }}>
           {weatherLoading ? 'Fetching Weather...' : 'Get Weather for Route'}
         </button>
@@ -403,15 +602,27 @@ function App() {
           <div style={{ background: '#113', padding: 16, borderRadius: 8, marginBottom: 16 }}>
             <h2>Weather</h2>
             {weather.error ? (
-              <p style={{ color: 'red' }}>{weather.error}</p>
+              <p style={{ color: 'red', fontWeight: 600 }}>{weather.error}</p>
             ) : (
               <>
                 <h3>Origin ({weather.origin}):</h3>
-                <p>{weather.origin_weather.weather ? weather.origin_weather.weather[0].description : 'No data'}</p>
-                <p>Temp: {weather.origin_weather.main ? weather.origin_weather.main.temp : 'N/A'}°C</p>
+                {weather.origin_weather && weather.origin_weather.error ? (
+                  <p style={{ color: 'red' }}>{weather.origin_weather.error}</p>
+                ) : (
+                  <>
+                    <p>{weather.origin_weather.weather ? weather.origin_weather.weather[0].description : 'No data'}</p>
+                    <p>Temp: {weather.origin_weather.main ? weather.origin_weather.main.temp : 'N/A'}°C</p>
+                  </>
+                )}
                 <h3>Destination ({weather.destination}):</h3>
-                <p>{weather.destination_weather.weather ? weather.destination_weather.weather[0].description : 'No data'}</p>
-                <p>Temp: {weather.destination_weather.main ? weather.destination_weather.main.temp : 'N/A'}°C</p>
+                {weather.destination_weather && weather.destination_weather.error ? (
+                  <p style={{ color: 'red' }}>{weather.destination_weather.error}</p>
+                ) : (
+                  <>
+                    <p>{weather.destination_weather.weather ? weather.destination_weather.weather[0].description : 'No data'}</p>
+                    <p>Temp: {weather.destination_weather.main ? weather.destination_weather.main.temp : 'N/A'}°C</p>
+                  </>
+                )}
               </>
             )}
           </div>
@@ -436,6 +647,7 @@ function App() {
           {airspacesLoading && <div style={{ position: 'absolute', top: 10, left: 10, color: 'yellow', zIndex: 1000 }}>Loading airspaces...</div>}
           {airspacesError && <div style={{ position: 'absolute', top: 10, left: 10, color: 'red', zIndex: 1000 }}>{airspacesError}</div>}
           <MapContainer center={[39.8283, -98.5795]} zoom={4} style={{ width: '100%', height: '100%' }}>
+            <FitRouteBounds routeResult={routeResult} />
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -446,7 +658,9 @@ function App() {
             {overflownMarkers}
             {diversionMarkers}
             {destMarker}
+            {airportWeatherMarkers}
             {segmentPolylines}
+            {legPopupMarker}
             {windBarbMarkers}
           </MapContainer>
         </div>
