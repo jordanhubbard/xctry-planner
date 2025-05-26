@@ -33,10 +33,20 @@ airspaces_gdf = gpd.read_file(AIRSPACES_GEOJSON)
 OPENWEATHERMAP_API_KEY = os.environ.get('OPENWEATHERMAP_API_KEY', '')
 
 def get_airport_info(icao):
+    code = icao.upper()
+    # Try ident, gps_code, local_code
     try:
-        row = airports_df.loc[icao.upper()]
+        if code in airports_df.index:
+            row = airports_df.loc[code]
+        else:
+            # Search gps_code and local_code columns
+            match = airports_df[(airports_df['gps_code'].str.upper() == code) | (airports_df['local_code'].str.upper() == code)]
+            if not match.empty:
+                row = match.iloc[0]
+            else:
+                return {"error": f"Airport {icao} not found"}
         return {
-            "icao": icao.upper(),
+            "icao": row.get('ident', code),
             "name": row['name'],
             "lat": row['latitude_deg'],
             "lon": row['longitude_deg'],

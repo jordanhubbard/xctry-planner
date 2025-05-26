@@ -748,6 +748,13 @@ function App() {
             </div>
           </form>
         </div>
+        {/* Show error messages immediately below the form */}
+        {(routeResult && routeResult.error) && (
+          <div style={{ color: 'white', background: 'red', padding: 12, borderRadius: 8, margin: '1em auto', maxWidth: 700, fontWeight: 600, fontSize: 18, textAlign: 'center' }}>{routeResult.error}</div>
+        )}
+        {(weather && weather.error) && (
+          <div style={{ color: 'white', background: 'red', padding: 12, borderRadius: 8, margin: '1em auto', maxWidth: 700, fontWeight: 600, fontSize: 18, textAlign: 'center' }}>{weather.error}</div>
+        )}
         {/* Move the map up, right after the form/buttons */}
         <div style={{ width: '80vw', height: '60vh', margin: '2em auto 1em auto', borderRadius: 8, overflow: 'hidden', position: 'relative' }}>
           {airspacesLoading && <div style={{ position: 'absolute', top: 10, left: 10, color: 'yellow', zIndex: 1000 }}>Loading airspaces...</div>}
@@ -798,12 +805,6 @@ function App() {
               </tr>
             </tbody>
           </table>
-        )}
-        {weather && weather.error && (
-          <div style={{ background: '#113', color: 'red', padding: 8, borderRadius: 8, margin: '1em auto', maxWidth: 700 }}>{weather.error}</div>
-        )}
-        {routeResult && routeResult.error && (
-          <div style={{ background: '#222', padding: 16, borderRadius: 8, color: 'red', marginBottom: 16 }}>{routeResult.error}</div>
         )}
         {routeSummaryRow}
         {legsTable}
