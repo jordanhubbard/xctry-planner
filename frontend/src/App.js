@@ -157,6 +157,8 @@ function App() {
   const [selectedLeg, setSelectedLeg] = useState(null);
   const [legPopup, setLegPopup] = useState(null);
   const [legLoading, setLegLoading] = useState(false);
+  const [legTerrain, setLegTerrain] = useState([]); // [{maxElev, loading, error}]
+  const [legTerrainLoading, setLegTerrainLoading] = useState(false);
 
   useEffect(() => {
     fetch('http://localhost:8000/')
@@ -192,6 +194,41 @@ function App() {
     }
   }, [routeResult]);
 
+  // Fetch terrain for all legs when route changes and avoid_terrain is checked
+  useEffect(() => {
+    if (
+      routeResult &&
+      routeResult.route &&
+      routeResult.route.length >= 2 &&
+      form.avoid_terrain
+    ) {
+      const points = [routeResult.origin_coords, ...(routeResult.overflown_coords || []), routeResult.destination_coords];
+      setLegTerrainLoading(true);
+      Promise.all(
+        points.slice(0, -1).map((from, i) => {
+          const to = points[i + 1];
+          return fetch('http://localhost:8000/terrain-profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ points: [from, to] }),
+          })
+            .then((res) => res.json())
+            .then((data) => ({
+              maxElev: Math.max(...data.map((p) => p.elevation || 0)),
+              error: null,
+            }))
+            .catch(() => ({ maxElev: 0, error: 'Could not fetch terrain' }));
+        })
+      ).then((results) => {
+        setLegTerrain(results);
+        setLegTerrainLoading(false);
+      });
+    } else {
+      setLegTerrain([]);
+      setLegTerrainLoading(false);
+    }
+  }, [routeResult, form.avoid_terrain]);
+
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
     setForm((prev) => ({
@@ -213,7 +250,10 @@ function App() {
       }),
     })
       .then((res) => res.json())
-      .then(setRouteResult)
+      .then((result) => {
+        setRouteResult(result);
+        if (!result.error) fetchWeather();
+      })
       .catch(() => setRouteResult({ error: 'Could not calculate route' }));
   };
 
@@ -300,20 +340,51 @@ function App() {
   if (routeResult && routeResult.route && routeResult.route.length >= 2 && routeResult.origin_coords && routeResult.destination_coords) {
     const points = [routeResult.origin_coords, ...(routeResult.overflown_coords || []), routeResult.destination_coords];
     const legs = [];
+    let prevAlt = parseInt(form.altitude, 10) || 0;
+    let magVar = 13; // Demo: fixed 13°W for CONUS
     for (let i = 0; i < points.length - 1; i++) {
       const from = points[i];
       const to = points[i + 1];
       const dist = haversine(from[0], from[1], to[0], to[1]);
       const time = form.speed ? dist / parseFloat(form.speed) : 0;
       const diversion = (routeResult.overflown_coords && routeResult.overflown_coords.length > 0 && i < routeResult.overflown_coords.length) ? routeResult.overflown_names[i] : '';
+      const course = calculateCourse(from[0], from[1], to[0], to[1]);
+      let magHeading = course - magVar;
+      if (magHeading < 0) magHeading += 360;
+      // VFR altitude logic
+      let vfrAlt = magHeading < 180 ? 3500 : 4500;
+      while (vfrAlt < prevAlt) vfrAlt += 2000;
+      // Terrain logic
+      let minAlt = prevAlt;
+      let altUsed = prevAlt;
+      let maxElev = 0;
+      let terrainError = null;
+      if (form.avoid_terrain && legTerrain && legTerrain[i]) {
+        maxElev = legTerrain[i].maxElev;
+        terrainError = legTerrain[i].error;
+        minAlt = Math.max(prevAlt, vfrAlt, maxElev + 2000);
+        altUsed = minAlt;
+      } else {
+        altUsed = Math.max(prevAlt, vfrAlt);
+      }
       legs.push({
         from: routeResult.route[i],
         to: routeResult.route[i + 1],
         dist: dist.toFixed(1),
         time: time > 0 ? time.toFixed(2) : '-',
-        altitude: form.altitude,
+        magHeading: magHeading.toFixed(0),
+        vfrAlt: vfrAlt.toFixed(0),
+        altUsed: altUsed.toFixed(0),
+        maxElev: maxElev ? maxElev.toFixed(0) : '',
+        terrainError,
         diversion,
       });
+      // Descend if possible for next leg
+      if (form.avoid_terrain && altUsed > prevAlt && (!legTerrain[i + 1] || (legTerrain[i + 1] && altUsed > Math.max(parseInt(form.altitude, 10) || 0, vfrAlt)))) {
+        prevAlt = Math.max(parseInt(form.altitude, 10) || 0, vfrAlt);
+      } else {
+        prevAlt = altUsed;
+      }
     }
     legsTable = (
       <table style={{ margin: '1em auto', background: '#222', color: 'white', borderRadius: 8 }}>
@@ -323,7 +394,10 @@ function App() {
             <th>To</th>
             <th>Distance (nm)</th>
             <th>Time (hr)</th>
-            <th>Altitude (ft)</th>
+            <th>Mag Heading</th>
+            <th>VFR Altitude</th>
+            <th>Altitude Used</th>
+            {form.avoid_terrain && <th>Max Terrain (ft)</th>}
             <th>Diversion Airport</th>
           </tr>
         </thead>
@@ -334,10 +408,43 @@ function App() {
               <td>{leg.to}</td>
               <td>{leg.dist}</td>
               <td>{leg.time}</td>
-              <td>{leg.altitude}</td>
+              <td>{leg.magHeading}</td>
+              <td>{leg.vfrAlt}</td>
+              <td>{leg.altUsed}</td>
+              {form.avoid_terrain && <td>{leg.terrainError ? <span style={{ color: 'red' }}>{leg.terrainError}</span> : leg.maxElev}</td>}
               <td>{leg.diversion}</td>
             </tr>
           ))}
+        </tbody>
+      </table>
+    );
+    if (form.avoid_terrain && legTerrainLoading) {
+      legsTable = <div style={{ color: 'yellow', margin: '1em' }}>Loading terrain for legs...</div>;
+    }
+  }
+
+  // Route Result as a compact row above the legs table
+  let routeSummaryRow = null;
+  if (routeResult && !routeResult.error && routeResult.route && routeResult.route.length >= 2) {
+    routeSummaryRow = (
+      <table style={{ margin: '1em auto', background: '#222', color: 'white', borderRadius: 8, minWidth: 700 }}>
+        <thead>
+          <tr>
+            <th style={{ minWidth: 120 }}>From</th>
+            <th style={{ minWidth: 120 }}>To</th>
+            <th>Distance (nm)</th>
+            <th>Time (hr)</th>
+            <th>Overflown Airports</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style={{ fontWeight: 600 }}>{routeResult.route[0]}</td>
+            <td style={{ fontWeight: 600 }}>{routeResult.route[routeResult.route.length - 1]}</td>
+            <td>{routeResult.distance_nm}</td>
+            <td>{routeResult.time_hr}</td>
+            <td>{routeResult.overflown_airports && routeResult.overflown_airports.length > 0 ? routeResult.overflown_airports.join(', ') : '-'}</td>
+          </tr>
         </tbody>
       </table>
     );
@@ -590,60 +697,49 @@ function App() {
                 </div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minWidth: 120, marginTop: 18 }}>
-                <button type="submit" style={{ padding: '12px 24px', borderRadius: 6, fontSize: 16, fontWeight: 600, background: '#2e7dff', color: 'white', border: 'none', boxShadow: '0 2px 8px rgba(30,60,180,0.08)', cursor: 'pointer' }}>Plan Route</button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="submit" style={{ padding: '12px 24px', borderRadius: 6, fontSize: 16, fontWeight: 600, background: '#2e7dff', color: 'white', border: 'none', boxShadow: '0 2px 8px rgba(30,60,180,0.08)', cursor: 'pointer' }}>Plan Route</button>
+                  <button type="button" onClick={fetchWeather} disabled={weatherLoading || !form.origin || !form.destination} style={{ padding: '12px 18px', borderRadius: 6, fontSize: 16, fontWeight: 600, background: '#444', color: 'white', border: 'none', boxShadow: '0 2px 8px rgba(30,60,180,0.08)', cursor: 'pointer' }}>
+                    {weatherLoading ? 'Refreshing...' : 'Refresh Weather'}
+                  </button>
+                </div>
               </div>
             </div>
           </form>
         </div>
-        <button onClick={fetchWeather} disabled={weatherLoading || !form.origin || !form.destination} style={{ marginBottom: 16 }}>
-          {weatherLoading ? 'Fetching Weather...' : 'Get Weather for Route'}
-        </button>
-        {weather && (
-          <div style={{ background: '#113', padding: 16, borderRadius: 8, marginBottom: 16 }}>
-            <h2>Weather</h2>
-            {weather.error ? (
-              <p style={{ color: 'red', fontWeight: 600 }}>{weather.error}</p>
-            ) : (
-              <>
-                <h3>Origin ({weather.origin}):</h3>
-                {weather.origin_weather && weather.origin_weather.error ? (
-                  <p style={{ color: 'red' }}>{weather.origin_weather.error}</p>
-                ) : (
-                  <>
-                    <p>{weather.origin_weather.weather ? weather.origin_weather.weather[0].description : 'No data'}</p>
-                    <p>Temp: {weather.origin_weather.main ? weather.origin_weather.main.temp : 'N/A'}°C</p>
-                  </>
-                )}
-                <h3>Destination ({weather.destination}):</h3>
-                {weather.destination_weather && weather.destination_weather.error ? (
-                  <p style={{ color: 'red' }}>{weather.destination_weather.error}</p>
-                ) : (
-                  <>
-                    <p>{weather.destination_weather.weather ? weather.destination_weather.weather[0].description : 'No data'}</p>
-                    <p>Temp: {weather.destination_weather.main ? weather.destination_weather.main.temp : 'N/A'}°C</p>
-                  </>
-                )}
-              </>
-            )}
-          </div>
+        {weather && !weather.error && routeResult && !routeResult.error && (
+          <table style={{ margin: '1em auto', background: '#113', color: 'white', borderRadius: 8, minWidth: 700 }}>
+            <thead>
+              <tr>
+                <th style={{ minWidth: 120 }}>Origin</th>
+                <th>Status</th>
+                <th>Temp (°C)</th>
+                <th style={{ minWidth: 120 }}>Destination</th>
+                <th>Status</th>
+                <th>Temp (°C)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={{ fontWeight: 600 }}>{weather.origin}</td>
+                <td>{getWeatherCategory(weather.origin_weather).cat}</td>
+                <td>{weather.origin_weather.main ? weather.origin_weather.main.temp : 'N/A'}</td>
+                <td style={{ fontWeight: 600 }}>{weather.destination}</td>
+                <td>{getWeatherCategory(weather.destination_weather).cat}</td>
+                <td>{weather.destination_weather.main ? weather.destination_weather.main.temp : 'N/A'}</td>
+              </tr>
+            </tbody>
+          </table>
         )}
-        {routeResult && (
-          <div style={{ background: '#222', padding: 16, borderRadius: 8 }}>
-            <h2>Route Result</h2>
-            {routeResult.error ? (
-              <p style={{ color: 'red' }}>{routeResult.error}</p>
-            ) : (
-              <>
-                <p>Route: {routeResult.route && routeResult.route.join(' → ')}</p>
-                <p>Distance: {routeResult.distance_nm} nm</p>
-                <p>Time: {routeResult.time_hr} hr</p>
-                <p>Overflown Airports: {routeResult.overflown_airports && routeResult.overflown_airports.join(', ')}</p>
-              </>
-            )}
-          </div>
+        {weather && weather.error && (
+          <div style={{ background: '#113', color: 'red', padding: 8, borderRadius: 8, margin: '1em auto', maxWidth: 700 }}>{weather.error}</div>
         )}
+        {routeResult && routeResult.error && (
+          <div style={{ background: '#222', padding: 16, borderRadius: 8, color: 'red', marginBottom: 16 }}>{routeResult.error}</div>
+        )}
+        {routeSummaryRow}
         {legsTable}
-        <div style={{ width: '80vw', height: '60vh', margin: '2em auto', borderRadius: 8, overflow: 'hidden', position: 'relative' }}>
+        <div style={{ width: '80vw', height: '60vh', margin: '2em auto 1em auto', borderRadius: 8, overflow: 'hidden', position: 'relative' }}>
           {airspacesLoading && <div style={{ position: 'absolute', top: 10, left: 10, color: 'yellow', zIndex: 1000 }}>Loading airspaces...</div>}
           {airspacesError && <div style={{ position: 'absolute', top: 10, left: 10, color: 'red', zIndex: 1000 }}>{airspacesError}</div>}
           <MapContainer center={[39.8283, -98.5795]} zoom={4} style={{ width: '100%', height: '100%' }}>
