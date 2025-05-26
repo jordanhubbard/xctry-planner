@@ -123,7 +123,7 @@ const SEGMENT_COLORS = {
 
 // Weather category function
 function getWeatherCategory(wx) {
-  if (!wx || !wx.weather || !wx.main) return { cat: 'Unknown', color: 'gray' };
+  if (!wx || !wx.weather || !wx.main) return { cat: 'Unknown', color: '#888' };
   // Visibility in meters, convert to sm
   const vis = wx.visibility ? wx.visibility / 1609.34 : null;
   // Find lowest cloud base (if any)
@@ -137,11 +137,11 @@ function getWeatherCategory(wx) {
   // MVFR: ceiling 1000-3000 or vis 3-5
   // IFR: ceiling 500-1000 or vis 1-3
   // LIFR: ceiling < 500 or vis < 1
-  if ((ceiling === null || ceiling > 3000) && vis !== null && vis > 5) return { cat: 'VFR', color: 'green' };
-  if ((ceiling !== null && ceiling > 1000 && ceiling <= 3000) || (vis !== null && vis > 3 && vis <= 5)) return { cat: 'MVFR', color: 'blue' };
-  if ((ceiling !== null && ceiling > 500 && ceiling <= 1000) || (vis !== null && vis > 1 && vis <= 3)) return { cat: 'IFR', color: 'red' };
-  if ((ceiling !== null && ceiling <= 500) || (vis !== null && vis <= 1)) return { cat: 'LIFR', color: 'magenta' };
-  return { cat: 'Unknown', color: 'gray' };
+  if ((ceiling === null || ceiling > 3000) && vis !== null && vis > 5) return { cat: 'VFR', color: '#00FF00' };
+  if ((ceiling !== null && ceiling > 1000 && ceiling <= 3000) || (vis !== null && vis > 3 && vis <= 5)) return { cat: 'MVFR', color: '#3399FF' };
+  if ((ceiling !== null && ceiling > 500 && ceiling <= 1000) || (vis !== null && vis > 1 && vis <= 3)) return { cat: 'IFR', color: '#FF3333' };
+  if ((ceiling !== null && ceiling <= 500) || (vis !== null && vis <= 1)) return { cat: 'LIFR', color: '#FF00FF' };
+  return { cat: 'Unknown', color: '#888' };
 }
 
 // Fit map to route bounds when route changes
@@ -380,7 +380,12 @@ function App() {
       const to = points[i + 1];
       const dist = haversine(from[0], from[1], to[0], to[1]);
       const time = form.speed ? dist / parseFloat(form.speed) : 0;
-      const diversion = (routeResult.overflown_coords && routeResult.overflown_coords.length > 0 && i < routeResult.overflown_coords.length) ? routeResult.overflown_names[i] : '';
+      let diversion = '';
+      if (routeResult.overflown_coords && routeResult.overflown_coords.length > 0 && i < routeResult.overflown_coords.length) {
+        const icao = routeResult.overflown_airports && routeResult.overflown_airports[i] ? routeResult.overflown_airports[i] : '';
+        const name = routeResult.overflown_names && routeResult.overflown_names[i] ? routeResult.overflown_names[i] : '';
+        diversion = icao && name ? `${icao} — ${name}` : (icao || name);
+      }
       const course = calculateCourse(from[0], from[1], to[0], to[1]);
       let magHeading = course - magVar;
       if (magHeading < 0) magHeading += 360;
@@ -564,7 +569,8 @@ function App() {
     airportWeatherMarkers.push(
       <Marker key="origin-wx" position={routeResult.origin_coords} icon={L.divIcon({ className: '', html: `<svg width='18' height='18'><circle cx='9' cy='9' r='7' fill='${originColor}' stroke='black' stroke-width='2'/></svg>` })}>
         <Popup>
-          {weather.origin} Weather: {originCat}
+          <b>{weather.origin} Weather: {originCat}</b><br />
+          {originWx.weather && originWx.weather[0] && originWx.weather[0].description ? originWx.weather[0].description : 'No data'}
         </Popup>
       </Marker>
     );
@@ -574,7 +580,8 @@ function App() {
     airportWeatherMarkers.push(
       <Marker key="dest-wx" position={routeResult.destination_coords} icon={L.divIcon({ className: '', html: `<svg width='18' height='18'><circle cx='9' cy='9' r='7' fill='${destColor}' stroke='black' stroke-width='2'/></svg>` })}>
         <Popup>
-          {weather.destination} Weather: {destCat}
+          <b>{weather.destination} Weather: {destCat}</b><br />
+          {destWx.weather && destWx.weather[0] && destWx.weather[0].description ? destWx.weather[0].description : 'No data'}
         </Popup>
       </Marker>
     );
@@ -586,7 +593,8 @@ function App() {
         airportWeatherMarkers.push(
           <Marker key={`overflown-wx-${i}`} position={coords} icon={L.divIcon({ className: '', html: `<svg width='18' height='18'><circle cx='9' cy='9' r='7' fill='${color}' stroke='black' stroke-width='2'/></svg>` })}>
             <Popup>
-              {routeResult.overflown_airports[i]} Weather: {cat}
+              <b>{routeResult.overflown_airports[i]} Weather: {cat}</b><br />
+              {originWx.weather && originWx.weather[0] && originWx.weather[0].description ? originWx.weather[0].description : 'No data'}
             </Popup>
           </Marker>
         );
@@ -770,13 +778,11 @@ function App() {
                 <th style={{ minWidth: 120 }}>Origin</th>
                 <th>Status</th>
                 <th>Temp (°C)</th>
-                <th>Wind (kt)</th>
-                <th>Dir (°)</th>
+                <th>Wind</th>
                 <th style={{ minWidth: 120 }}>Destination</th>
                 <th>Status</th>
                 <th>Temp (°C)</th>
-                <th>Wind (kt)</th>
-                <th>Dir (°)</th>
+                <th>Wind</th>
               </tr>
             </thead>
             <tbody>
@@ -784,13 +790,11 @@ function App() {
                 <td style={{ fontWeight: 600 }}>{weather.origin}</td>
                 <td>{getWeatherCategory(weather.origin_weather).cat}</td>
                 <td>{weather.origin_weather.main ? weather.origin_weather.main.temp : 'N/A'}</td>
-                <td>{weather.origin_weather.wind && weather.origin_weather.wind.speed !== undefined ? (weather.origin_weather.wind.speed * 1.94384).toFixed(1) : 'N/A'}</td>
-                <td>{weather.origin_weather.wind && weather.origin_weather.wind.deg !== undefined ? weather.origin_weather.wind.deg : 'N/A'}</td>
+                <td>{weather.origin_weather.wind && weather.origin_weather.wind.speed !== undefined && weather.origin_weather.wind.deg !== undefined ? `${weather.origin_weather.wind.deg}° @ ${(weather.origin_weather.wind.speed * 1.94384).toFixed(1)} kt` : 'N/A'}</td>
                 <td style={{ fontWeight: 600 }}>{weather.destination}</td>
                 <td>{getWeatherCategory(weather.destination_weather).cat}</td>
                 <td>{weather.destination_weather.main ? weather.destination_weather.main.temp : 'N/A'}</td>
-                <td>{weather.destination_weather.wind && weather.destination_weather.wind.speed !== undefined ? (weather.destination_weather.wind.speed * 1.94384).toFixed(1) : 'N/A'}</td>
-                <td>{weather.destination_weather.wind && weather.destination_weather.wind.deg !== undefined ? weather.destination_weather.wind.deg : 'N/A'}</td>
+                <td>{weather.destination_weather.wind && weather.destination_weather.wind.speed !== undefined && weather.destination_weather.wind.deg !== undefined ? `${weather.destination_weather.wind.deg}° @ ${(weather.destination_weather.wind.speed * 1.94384).toFixed(1)} kt` : 'N/A'}</td>
               </tr>
             </tbody>
           </table>

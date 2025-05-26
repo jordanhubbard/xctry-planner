@@ -120,10 +120,21 @@ def calculate_route(req: RouteRequest):
 
     # Diversion logic: break up long legs with overflown airports
     def find_nearest_airport(lat, lon, exclude_idents):
-        # Find nearest public airport not in exclude_idents
+        # Find nearest public airport with valid ICAO code not in exclude_idents
+        def is_valid_icao(ident):
+            return (
+                isinstance(ident, str)
+                and len(ident) == 4
+                and ident.isalnum()
+                and not ident.startswith('US-')
+                and not ident[0].isdigit()
+            )
         dists = ((row['latitude_deg'], row['longitude_deg'], ident)
                  for ident, row in airports_df.iterrows()
-                 if ident not in exclude_idents and row.get('type', '').startswith('large_airport') or row.get('type', '').startswith('medium_airport') or row.get('type', '').startswith('small_airport'))
+                 if ident not in exclude_idents
+                 and row.get('type', '').startswith(('large_airport', 'medium_airport', 'small_airport'))
+                 and is_valid_icao(ident)
+                 and row.get('scheduled_service', 'no') != 'closed')
         min_dist = float('inf')
         nearest = None
         for alat, alon, ident in dists:
