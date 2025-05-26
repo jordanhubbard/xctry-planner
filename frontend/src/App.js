@@ -46,14 +46,6 @@ function calculateCourse(lat1, lon1, lat2, lon2) {
   return (brng + 360) % 360;
 }
 
-function suggestVFRAltitudes(course) {
-  // Odd thousands + 500 for 0-179 (east), even + 500 for 180-359 (west)
-  const east = [3500, 5500, 7500, 9500, 11500];
-  const west = [4500, 6500, 8500, 10500, 12500];
-  if (course >= 0 && course < 180) return east;
-  return west;
-}
-
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 3440.065; // nm
   const toRad = (deg) => deg * Math.PI / 180;
@@ -113,7 +105,6 @@ function App() {
   const [airspaces, setAirspaces] = useState(null);
   const [airspacesLoading, setAirspacesLoading] = useState(false);
   const [airspacesError, setAirspacesError] = useState(null);
-  const [vfrAltitudes, setVfrAltitudes] = useState([]);
   const [terrainProfile, setTerrainProfile] = useState([]);
   const [terrainLoading, setTerrainLoading] = useState(false);
   const [terrainError, setTerrainError] = useState(null);
@@ -124,18 +115,6 @@ function App() {
       .then((data) => setBackendMsg(data.message))
       .catch(() => setBackendMsg('Could not reach backend'));
   }, []);
-
-  useEffect(() => {
-    // Suggest VFR altitudes when route changes
-    if (routeResult && routeResult.origin_coords && routeResult.destination_coords) {
-      const [lat1, lon1] = routeResult.origin_coords;
-      const [lat2, lon2] = routeResult.destination_coords;
-      const course = calculateCourse(lat1, lon1, lat2, lon2);
-      setVfrAltitudes(suggestVFRAltitudes(course));
-    } else {
-      setVfrAltitudes([]);
-    }
-  }, [routeResult]);
 
   useEffect(() => {
     // Fetch terrain profile when route changes
@@ -170,10 +149,6 @@ function App() {
       ...prev,
       [name]: type === 'checkbox' ? checked : value,
     }));
-  };
-
-  const handleVFRAltitudeChange = (e) => {
-    setForm((prev) => ({ ...prev, altitude: e.target.value }));
   };
 
   const handleSubmit = (e) => {
@@ -379,12 +354,15 @@ function App() {
             required
             style={{ marginRight: 8, width: 120 }}
           />
-          <select name="altitude" value={form.altitude} onChange={handleVFRAltitudeChange} required style={{ marginRight: 8, width: 160 }}>
-            <option value="">Select VFR Altitude</option>
-            {vfrAltitudes.map((alt, i) => (
-              <option key={i} value={alt}>{alt} ft</option>
-            ))}
-          </select>
+          <input
+            name="altitude"
+            placeholder="Cruise Altitude (ft)"
+            value={form.altitude}
+            onChange={handleChange}
+            type="number"
+            required
+            style={{ marginRight: 8, width: 160 }}
+          />
           <input
             name="max_leg_distance"
             placeholder="Max leg distance (nm)"
