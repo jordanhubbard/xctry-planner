@@ -5,17 +5,50 @@ import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 
 function WindBarbMarker({ lat, lon, wind_deg, wind_speed }) {
-  const icon = L.divIcon({
-    className: '',
-    html: `<svg width="32" height="32" style="transform: rotate(${wind_deg || 0}deg);">
-      <g>
-        <line x1="16" y1="28" x2="16" y2="4" stroke="blue" stroke-width="3" />
-        <polygon points="12,8 16,0 20,8" fill="blue" />
-      </g>
-      <text x="16" y="30" text-anchor="middle" font-size="10" fill="black">${wind_speed ? wind_speed.toFixed(0) : ''}</text>
-    </svg>`
-  });
-  return <Marker position={[lat, lon]} icon={icon} />;
+  // Standard VFR wind barb SVG
+  // wind_deg: direction wind is FROM (meteorological)
+  // wind_speed: in knots
+  const speed = wind_speed ? Math.round(wind_speed) : 0;
+  let remaining = speed;
+  const barbs = [];
+  let y = 6; // Start 6px from top
+  // Staff: always 24px long
+  // Draw triangles (50kt)
+  let x0 = 16, y0 = 28, x1 = 16, y1 = 4;
+  let barbX = x1, barbY = y1;
+  let barbLen = 12;
+  let barbAngle = 60 * Math.PI / 180; // 60 degrees
+  let pos = 0;
+  while (remaining >= 50) {
+    // Triangle (flag)
+    barbs.push(<polygon key={pos} points={`${barbX},${barbY} ${barbX + barbLen * Math.cos(barbAngle)},${barbY + barbLen * Math.sin(barbAngle)} ${barbX},${barbY + 6}`} fill="black" />);
+    barbY += 6;
+    remaining -= 50;
+    pos++;
+  }
+  while (remaining >= 10) {
+    // Full barb
+    barbs.push(<line key={pos} x1={barbX} y1={barbY} x2={barbX + barbLen * Math.cos(barbAngle)} y2={barbY + barbLen * Math.sin(barbAngle)} stroke="black" strokeWidth="2" />);
+    barbY += 4;
+    remaining -= 10;
+    pos++;
+  }
+  if (remaining >= 5) {
+    // Half barb
+    barbs.push(<line key={pos} x1={barbX} y1={barbY} x2={barbX + barbLen * Math.cos(barbAngle) * 0.5} y2={barbY + barbLen * Math.sin(barbAngle) * 0.5} stroke="black" strokeWidth="2" />);
+  }
+  return (
+    <Marker position={[lat, lon]} icon={L.divIcon({
+      className: '',
+      html: `<svg width='32' height='32' style='transform: rotate(${wind_deg || 0}deg);'>
+        <g>
+          <line x1='16' y1='28' x2='16' y2='4' stroke='black' stroke-width='3' />
+        </g>
+        ${barbs.map(b => b.props ? b.props.points ? `<polygon points='${b.props.points}' fill='black' />` : `<line x1='${b.props.x1}' y1='${b.props.y1}' x2='${b.props.x2}' y2='${b.props.y2}' stroke='black' stroke-width='2' />` : '').join('')}
+        <text x='16' y='30' text-anchor='middle' font-size='10' fill='black'>${speed}</text>
+      </svg>`
+    })} />
+  );
 }
 
 function AirspaceOverlay({ setAirspaces }) {
@@ -707,38 +740,7 @@ function App() {
             </div>
           </form>
         </div>
-        {weather && !weather.error && routeResult && !routeResult.error && (
-          <table style={{ margin: '1em auto', background: '#113', color: 'white', borderRadius: 8, minWidth: 700 }}>
-            <thead>
-              <tr>
-                <th style={{ minWidth: 120 }}>Origin</th>
-                <th>Status</th>
-                <th>Temp (°C)</th>
-                <th style={{ minWidth: 120 }}>Destination</th>
-                <th>Status</th>
-                <th>Temp (°C)</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td style={{ fontWeight: 600 }}>{weather.origin}</td>
-                <td>{getWeatherCategory(weather.origin_weather).cat}</td>
-                <td>{weather.origin_weather.main ? weather.origin_weather.main.temp : 'N/A'}</td>
-                <td style={{ fontWeight: 600 }}>{weather.destination}</td>
-                <td>{getWeatherCategory(weather.destination_weather).cat}</td>
-                <td>{weather.destination_weather.main ? weather.destination_weather.main.temp : 'N/A'}</td>
-              </tr>
-            </tbody>
-          </table>
-        )}
-        {weather && weather.error && (
-          <div style={{ background: '#113', color: 'red', padding: 8, borderRadius: 8, margin: '1em auto', maxWidth: 700 }}>{weather.error}</div>
-        )}
-        {routeResult && routeResult.error && (
-          <div style={{ background: '#222', padding: 16, borderRadius: 8, color: 'red', marginBottom: 16 }}>{routeResult.error}</div>
-        )}
-        {routeSummaryRow}
-        {legsTable}
+        {/* Move the map up, right after the form/buttons */}
         <div style={{ width: '80vw', height: '60vh', margin: '2em auto 1em auto', borderRadius: 8, overflow: 'hidden', position: 'relative' }}>
           {airspacesLoading && <div style={{ position: 'absolute', top: 10, left: 10, color: 'yellow', zIndex: 1000 }}>Loading airspaces...</div>}
           {airspacesError && <div style={{ position: 'absolute', top: 10, left: 10, color: 'red', zIndex: 1000 }}>{airspacesError}</div>}
@@ -760,6 +762,47 @@ function App() {
             {windBarbMarkers}
           </MapContainer>
         </div>
+        {/* Weather info as a compact row above the legs table */}
+        {weather && !weather.error && routeResult && !routeResult.error && (
+          <table style={{ margin: '1em auto', background: '#113', color: 'white', borderRadius: 8, minWidth: 900 }}>
+            <thead>
+              <tr>
+                <th style={{ minWidth: 120 }}>Origin</th>
+                <th>Status</th>
+                <th>Temp (°C)</th>
+                <th>Wind (kt)</th>
+                <th>Dir (°)</th>
+                <th style={{ minWidth: 120 }}>Destination</th>
+                <th>Status</th>
+                <th>Temp (°C)</th>
+                <th>Wind (kt)</th>
+                <th>Dir (°)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={{ fontWeight: 600 }}>{weather.origin}</td>
+                <td>{getWeatherCategory(weather.origin_weather).cat}</td>
+                <td>{weather.origin_weather.main ? weather.origin_weather.main.temp : 'N/A'}</td>
+                <td>{weather.origin_weather.wind && weather.origin_weather.wind.speed !== undefined ? (weather.origin_weather.wind.speed * 1.94384).toFixed(1) : 'N/A'}</td>
+                <td>{weather.origin_weather.wind && weather.origin_weather.wind.deg !== undefined ? weather.origin_weather.wind.deg : 'N/A'}</td>
+                <td style={{ fontWeight: 600 }}>{weather.destination}</td>
+                <td>{getWeatherCategory(weather.destination_weather).cat}</td>
+                <td>{weather.destination_weather.main ? weather.destination_weather.main.temp : 'N/A'}</td>
+                <td>{weather.destination_weather.wind && weather.destination_weather.wind.speed !== undefined ? (weather.destination_weather.wind.speed * 1.94384).toFixed(1) : 'N/A'}</td>
+                <td>{weather.destination_weather.wind && weather.destination_weather.wind.deg !== undefined ? weather.destination_weather.wind.deg : 'N/A'}</td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+        {weather && weather.error && (
+          <div style={{ background: '#113', color: 'red', padding: 8, borderRadius: 8, margin: '1em auto', maxWidth: 700 }}>{weather.error}</div>
+        )}
+        {routeResult && routeResult.error && (
+          <div style={{ background: '#222', padding: 16, borderRadius: 8, color: 'red', marginBottom: 16 }}>{routeResult.error}</div>
+        )}
+        {routeSummaryRow}
+        {legsTable}
         <ElevationChart profile={terrainProfile} loading={terrainLoading} error={terrainError} />
       </header>
     </div>
