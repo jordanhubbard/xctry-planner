@@ -104,4 +104,16 @@ A web application for aviators to plan cross-country flights between two airport
 - [ ] User authentication and saved plans
 - [ ] Export/print flight plan
 - [ ] Mobile-friendly UI
-- [ ] More advanced route optimization (fuel stops, NOTAMs, etc.) 
+- [ ] More advanced route optimization (fuel stops, NOTAMs, etc.)
+
+## Fuel Stop Planning (NEW)
+
+- Add a checkbox to the flight planning form: **"Plan fuel stops automatically"**
+- Add a text entry for **"Aircraft range (nm)"**
+- If enabled, the planner will:
+  - Use the entered range to determine if the trip requires fuel stops
+  - If the trip can be completed within range, no fuel stops are added
+  - If not, the route will be segmented so that no leg exceeds the aircraft's range, and fuel stops will be inserted at suitable airports with fuel
+  - Diversion airports will also be filtered to only include those with fuel available (if this option is enabled)
+- The backend will use both the merged airport data and fuel availability fields to select fuel stops and diversions
+- The UI will display fuel stops distinctly on the map and in the legs table 

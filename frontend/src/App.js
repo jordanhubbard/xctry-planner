@@ -166,17 +166,24 @@ function getRecommendedVFRAltitude(heading, minAltitude) {
   return base;
 }
 
+const defaultForm = {
+  origin: '',
+  destination: '',
+  speed: 100,
+  speedUnit: 'knots',
+  altitude: 3500,
+  maxLegDistance: 150,
+  avoidAirspaces: true,
+  avoidTerrain: true,
+  planFuelStops: false,
+  aircraftRangeNm: ''
+};
+
 function App() {
   const [backendMsg, setBackendMsg] = useState('');
-  const [form, setForm] = useState({
-    origin: '',
-    destination: '',
-    speed: '',
-    speed_unit: 'knots',
-    altitude: '',
-    avoid_airspaces: false,
-    avoid_terrain: false,
-    max_leg_distance: 150,
+  const [form, setForm] = useState(() => {
+    const saved = localStorage.getItem('flightForm');
+    return saved ? JSON.parse(saved) : defaultForm;
   });
   const [routeResult, setRouteResult] = useState(null);
   const [weather, setWeather] = useState(null);
@@ -193,6 +200,10 @@ function App() {
   const [legTerrain, setLegTerrain] = useState([]); // [{maxElev, loading, error}]
   const [legTerrainLoading, setLegTerrainLoading] = useState(false);
   const [routeLoading, setRouteLoading] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem('flightForm', JSON.stringify(form));
+  }, [form]);
 
   useEffect(() => {
     fetch('http://localhost:8000/')
@@ -234,7 +245,7 @@ function App() {
       routeResult &&
       routeResult.route &&
       routeResult.route.length >= 2 &&
-      form.avoid_terrain
+      form.avoidTerrain
     ) {
       const points = [routeResult.origin_coords, ...(routeResult.overflown_coords || []), routeResult.destination_coords];
       setLegTerrainLoading(true);
@@ -261,14 +272,18 @@ function App() {
       setLegTerrain([]);
       setLegTerrainLoading(false);
     }
-  }, [routeResult, form.avoid_terrain]);
+  }, [routeResult, form.avoidTerrain]);
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
-    setForm((prev) => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value,
-    }));
+    setForm((prev) => {
+      const updated = {
+        ...prev,
+        [name]: type === 'checkbox' ? checked : value
+      };
+      localStorage.setItem('flightForm', JSON.stringify(updated));
+      return updated;
+    });
   };
 
   const handleSubmit = (e) => {
@@ -278,10 +293,16 @@ function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ...form,
+        origin: form.origin,
+        destination: form.destination,
         speed: parseFloat(form.speed),
+        speed_unit: form.speedUnit,
         altitude: parseInt(form.altitude, 10),
-        max_leg_distance: parseFloat(form.max_leg_distance),
+        max_leg_distance: parseFloat(form.maxLegDistance),
+        avoid_airspaces: form.avoidAirspaces,
+        avoid_terrain: form.avoidTerrain,
+        plan_fuel_stops: form.planFuelStops,
+        aircraft_range_nm: form.planFuelStops ? parseFloat(form.aircraftRangeNm) : undefined
       }),
     })
       .then((res) => res.json())
@@ -382,9 +403,9 @@ function App() {
     let prevAlt = parseInt(form.altitude, 10) || 0;
     let magVar = 13; // Demo: fixed 13°W for CONUS
     for (let i = 0; i < points.length - 1; i++) {
-      const from = points[i];
-      const to = points[i + 1];
-      const dist = haversine(from[0], from[1], to[0], to[1]);
+      const from = routeResult.route[i];
+      const to = routeResult.route[i + 1];
+      const dist = haversine(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1]);
       const time = form.speed ? dist / parseFloat(form.speed) : 0;
       let diversion = '';
       if (routeResult.overflown_coords && routeResult.overflown_coords.length > 0 && i < routeResult.overflown_coords.length) {
@@ -392,18 +413,16 @@ function App() {
         const name = routeResult.overflown_names && routeResult.overflown_names[i] ? routeResult.overflown_names[i] : '';
         diversion = icao && name ? `${icao} — ${name}` : (icao || name);
       }
-      const course = calculateCourse(from[0], from[1], to[0], to[1]);
+      const course = calculateCourse(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1]);
       let magHeading = course - magVar;
       if (magHeading < 0) magHeading += 360;
-      // VFR altitude logic
       let vfrAlt = magHeading < 180 ? 3500 : 4500;
       while (vfrAlt < prevAlt) vfrAlt += 2000;
-      // Terrain logic
       let minAlt = prevAlt;
       let altUsed = prevAlt;
       let maxElev = 0;
       let terrainError = null;
-      if (form.avoid_terrain && legTerrain && legTerrain[i]) {
+      if (form.avoidTerrain && legTerrain && legTerrain[i]) {
         maxElev = legTerrain[i].maxElev;
         terrainError = legTerrain[i].error;
         minAlt = Math.max(prevAlt, vfrAlt, maxElev + 2000);
@@ -412,8 +431,8 @@ function App() {
         altUsed = Math.max(prevAlt, vfrAlt);
       }
       legs.push({
-        from: routeResult.route[i],
-        to: routeResult.route[i + 1],
+        from,
+        to,
         dist: dist.toFixed(1),
         time: time > 0 ? time.toFixed(2) : '-',
         magHeading: magHeading.toFixed(0),
@@ -422,9 +441,9 @@ function App() {
         maxElev: maxElev ? maxElev.toFixed(0) : '',
         terrainError,
         diversion,
+        isFuel: from.includes('(FUEL)') || to.includes('(FUEL)')
       });
-      // Descend if possible for next leg
-      if (form.avoid_terrain && altUsed > prevAlt && (!legTerrain[i + 1] || (legTerrain[i + 1] && altUsed > Math.max(parseInt(form.altitude, 10) || 0, vfrAlt)))) {
+      if (form.avoidTerrain && altUsed > prevAlt && (!legTerrain[i + 1] || (legTerrain[i + 1] && altUsed > Math.max(parseInt(form.altitude, 10) || 0, vfrAlt)))) {
         prevAlt = Math.max(parseInt(form.altitude, 10) || 0, vfrAlt);
       } else {
         prevAlt = altUsed;
@@ -441,28 +460,28 @@ function App() {
             <th>Mag Heading</th>
             <th>VFR Altitude</th>
             <th>Altitude Used</th>
-            {form.avoid_terrain && <th>Max Terrain (ft)</th>}
+            {form.avoidTerrain && <th>Max Terrain (ft)</th>}
             <th>Diversion Airport</th>
           </tr>
         </thead>
         <tbody>
           {legs.map((leg, i) => (
-            <tr key={i} style={leg.diversion ? { background: '#333', color: 'yellow' } : {}}>
-              <td>{leg.from}</td>
-              <td>{leg.to}</td>
+            <tr key={i} style={leg.isFuel ? { background: '#1e3a5c', color: '#fff', fontWeight: 600 } : leg.diversion ? { background: '#333', color: 'yellow' } : {}}>
+              <td>{leg.from.replace(' (FUEL)', '')}{leg.from.includes('(FUEL)') && <span title="Fuel Stop" style={{ marginLeft: 4, color: '#2e7dff' }}>⛽</span>}</td>
+              <td>{leg.to.replace(' (FUEL)', '')}{leg.to.includes('(FUEL)') && <span title="Fuel Stop" style={{ marginLeft: 4, color: '#2e7dff' }}>⛽</span>}</td>
               <td>{leg.dist}</td>
               <td>{leg.time}</td>
               <td>{leg.magHeading}</td>
               <td>{leg.vfrAlt}</td>
               <td>{leg.altUsed}</td>
-              {form.avoid_terrain && <td>{leg.terrainError ? <span style={{ color: 'red' }}>{leg.terrainError}</span> : leg.maxElev}</td>}
+              {form.avoidTerrain && <td>{leg.terrainError ? <span style={{ color: 'red' }}>{leg.terrainError}</span> : leg.maxElev}</td>}
               <td>{leg.diversion}</td>
             </tr>
           ))}
         </tbody>
       </table>
     );
-    if (form.avoid_terrain && legTerrainLoading) {
+    if (form.avoidTerrain && legTerrainLoading) {
       legsTable = <div style={{ color: 'yellow', margin: '1em' }}>Loading terrain for legs...</div>;
     }
   }
@@ -516,7 +535,7 @@ function App() {
               if (magHeading < 0) magHeading += 360;
               let minAlt = 0;
               let terrainMsg = '';
-              if (form.avoid_terrain) {
+              if (form.avoidTerrain) {
                 // Fetch terrain profile for this leg
                 try {
                   const res = await fetch('http://localhost:8000/terrain-profile', {
@@ -556,14 +575,28 @@ function App() {
   // Overflown airport markers (diversion airports)
   let diversionMarkers = [];
   if (routeResult && routeResult.overflown_coords && routeResult.overflown_names) {
-    diversionMarkers = routeResult.overflown_coords.map((coords, i) => (
-      <Marker position={coords} key={i} icon={L.divIcon({ className: '', html: `<svg width='28' height='28'><circle cx='14' cy='14' r='10' fill='yellow' stroke='black' stroke-width='2'/><text x='14' y='19' text-anchor='middle' font-size='10' fill='black'>D</text></svg>` })}>
-        <Popup>
-          Diversion Airport<br />
-          {routeResult.overflown_names[i]}
-        </Popup>
-      </Marker>
-    ));
+    diversionMarkers = routeResult.overflown_coords.map((coords, i) => {
+      const name = routeResult.overflown_names[i] || '';
+      if (name.includes('(FUEL)')) {
+        return (
+          <Marker position={coords} key={i} icon={L.divIcon({ className: '', html: `<svg width='28' height='28'><circle cx='14' cy='14' r='10' fill='#2e7dff' stroke='black' stroke-width='2'/><text x='14' y='19' text-anchor='middle' font-size='13' fill='white'>⛽</text></svg>` })}>
+            <Popup>
+              Fuel Stop & Diversion<br />
+              {name.replace(' (FUEL)', '')}
+            </Popup>
+          </Marker>
+        );
+      } else {
+        return (
+          <Marker position={coords} key={i} icon={L.divIcon({ className: '', html: `<svg width='28' height='28'><circle cx='14' cy='14' r='10' fill='yellow' stroke='black' stroke-width='2'/><text x='14' y='19' text-anchor='middle' font-size='10' fill='black'>D</text></svg>` })}>
+            <Popup>
+              Diversion Airport<br />
+              {name}
+            </Popup>
+          </Marker>
+        );
+      }
+    });
   }
 
   // Weather status dots for each airport
@@ -618,6 +651,25 @@ function App() {
         </Popup>
       </Marker>
     );
+  }
+
+  // Fuel stop markers on the map
+  let fuelStopMarkers = [];
+  if (routeResult && routeResult.overflown_coords && routeResult.overflown_names) {
+    fuelStopMarkers = routeResult.overflown_coords.map((coords, i) => {
+      const name = routeResult.overflown_names[i] || '';
+      if (name.includes('(FUEL)')) {
+        return (
+          <Marker position={coords} key={i} icon={L.divIcon({ className: '', html: `<svg width='28' height='28'><circle cx='14' cy='14' r='10' fill='#2e7dff' stroke='black' stroke-width='2'/><text x='14' y='19' text-anchor='middle' font-size='13' fill='white'>⛽</text></svg>` })}>
+            <Popup>
+              Fuel Stop<br />
+              {name.replace(' (FUEL)', '')}
+            </Popup>
+          </Marker>
+        );
+      }
+      return null;
+    }).filter(Boolean);
   }
 
   return (
@@ -683,7 +735,7 @@ function App() {
                     required
                     style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #888', fontSize: 16, width: 100 }}
                   />
-                  <select name="speed_unit" value={form.speed_unit} onChange={handleChange} style={{ padding: '8px', borderRadius: 6, border: '1px solid #888', fontSize: 15 }}>
+                  <select name="speedUnit" value={form.speedUnit} onChange={handleChange} style={{ padding: '8px', borderRadius: 6, border: '1px solid #888', fontSize: 15 }}>
                     <option value="knots">knots</option>
                     <option value="mph">mph</option>
                   </select>
@@ -703,12 +755,12 @@ function App() {
                 />
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', minWidth: 180 }}>
-                <label htmlFor="max_leg_distance" style={{ fontWeight: 500, marginBottom: 6 }}>Max Leg Distance</label>
+                <label htmlFor="maxLegDistance" style={{ fontWeight: 500, marginBottom: 6 }}>Max Leg Distance</label>
                 <input
-                  id="max_leg_distance"
-                  name="max_leg_distance"
+                  id="maxLegDistance"
+                  name="maxLegDistance"
                   placeholder="nm"
-                  value={form.max_leg_distance}
+                  value={form.maxLegDistance}
                   onChange={handleChange}
                   type="number"
                   min={50}
@@ -723,9 +775,9 @@ function App() {
                 <div style={{ display: 'flex', gap: 12 }}>
                   <label style={{ fontWeight: 400, fontSize: 15 }}>
                     <input
-                      name="avoid_airspaces"
+                      name="avoidAirspaces"
                       type="checkbox"
-                      checked={form.avoid_airspaces}
+                      checked={form.avoidAirspaces}
                       onChange={handleChange}
                       style={{ marginRight: 6 }}
                     />
@@ -733,9 +785,9 @@ function App() {
                   </label>
                   <label style={{ fontWeight: 400, fontSize: 15 }}>
                     <input
-                      name="avoid_terrain"
+                      name="avoidTerrain"
                       type="checkbox"
-                      checked={form.avoid_terrain}
+                      checked={form.avoidTerrain}
                       onChange={handleChange}
                       style={{ marginRight: 6 }}
                     />
@@ -750,6 +802,28 @@ function App() {
                     {weatherLoading ? 'Refreshing...' : 'Refresh Weather'}
                   </button>
                 </div>
+              </div>
+              <div className="form-row">
+                <label>
+                  <input
+                    type="checkbox"
+                    name="planFuelStops"
+                    checked={form.planFuelStops}
+                    onChange={handleChange}
+                  />
+                  Plan fuel stops automatically
+                </label>
+                <input
+                  type="number"
+                  name="aircraftRangeNm"
+                  min="1"
+                  step="1"
+                  placeholder="Aircraft range (nm)"
+                  value={form.aircraftRangeNm}
+                  onChange={handleChange}
+                  disabled={!form.planFuelStops}
+                  style={{ marginLeft: 12, width: 180 }}
+                />
               </div>
             </div>
           </form>
@@ -784,9 +858,13 @@ function App() {
             {diversionMarkers}
             {destMarker}
             {airportWeatherMarkers}
+            {polylinePositions && (
+              <Polyline positions={polylinePositions} color="black" weight={2} />
+            )}
             {segmentPolylines}
             {legPopupMarker}
             {windBarbMarkers}
+            {fuelStopMarkers}
           </MapContainer>
         </div>
         {/* Weather info as a compact row above the legs table */}

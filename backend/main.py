@@ -113,12 +113,27 @@ def get_airport_info(icao):
     code = icao.upper()
     row = code_to_row.get(code)
     if row is not None:
+        # Prefer CSV lat/lon if present, else use OpenAIP
+        try:
+            lat = float(row.get('latitude_deg'))
+            lon = float(row.get('longitude_deg'))
+        except (TypeError, ValueError):
+            coords = row.get('openaip', {}).get('geometry', {}).get('coordinates')
+            if coords and len(coords) == 2:
+                lon, lat = coords
+            else:
+                return {"error": f"Missing coordinates for {icao}"}
+        # Prefer CSV elevation if present, else use OpenAIP
+        try:
+            elevation = float(row.get('elevation_ft', 0))
+        except (TypeError, ValueError):
+            elevation = row.get('openaip', {}).get('elevation', {}).get('value', 0)
         return {
-            "icao": row.get('icaoCode', code),
+            "icao": row.get('icao_code', code),
             "name": row.get('name', code),
-            "lat": row['geometry']['coordinates'][1],
-            "lon": row['geometry']['coordinates'][0],
-            "elevation": row.get('elevation', 0)
+            "lat": lat,
+            "lon": lon,
+            "elevation": elevation
         }
     return {"error": f"Airport {icao} not found"}
 
@@ -139,6 +154,8 @@ class RouteRequest(BaseModel):
     avoid_airspaces: bool
     avoid_terrain: bool
     max_leg_distance: float = 150.0  # nm, default value
+    plan_fuel_stops: bool = False
+    aircraft_range_nm: float = None
 
 def is_public_open_airport(row):
     # OpenAIP: 'private' == False for public-use
@@ -163,13 +180,42 @@ def is_public_open_airport(row):
     print(f"Skipping {row.get('name')} ({row.get('icaoCode')}) - no suitable runway")
     return False
 
-def find_nearest_airport(lat, lon, exclude_codes):
+def is_likely_fuel_airport(row):
+    if row.get('private', True):
+        return False
+    runways = row.get('runways', [])
+    if not isinstance(runways, list):
+        runways = []
+    has_paved = False
+    for rwy in runways:
+        try:
+            length = rwy.get('dimension', {}).get('length', {}).get('value', 0)
+            surface = rwy.get('surface', {}).get('mainComposite', None)
+            if length >= 610 and surface in [0, 1, 2, 4]:
+                has_paved = True
+                if length >= 610 and surface in [0, 1, 2, 4]:
+                    if length >= 610 and surface in [0, 1, 2, 4]:
+                        if length >= 610 and surface in [0, 1, 2, 4]:
+                            pass
+        except Exception:
+            continue
+    if not has_paved:
+        return False
+    # CSV: scheduled_service == 'yes' is a good proxy for fuel
+    if row.get('scheduled_service', '').lower() == 'yes':
+        return True
+    # Otherwise, not sure
+    return False
+
+def find_nearest_airport(lat, lon, exclude_codes, fuel_only=False):
     min_dist = float('inf')
     nearest = None
     for code, row in code_to_row.items():
         if code in exclude_codes:
             continue
         if not is_public_open_airport(row):
+            continue
+        if fuel_only and not is_likely_fuel_airport(row):
             continue
         coords = row['geometry']['coordinates']
         alat, alon = coords[1], coords[0]
@@ -303,7 +349,6 @@ def calculate_route(req: RouteRequest):
     # Airspace avoidance (iterative)
     if req.avoid_airspaces:
         route_points = avoid_airspaces(route_points)
-        # Insert detour names for each detour
         route_names = [req.origin.upper()] + ["DETOUR"] * (len(route_points) - 2) + [req.destination.upper()]
 
     # Diversion logic: break up long legs with overflown airports
@@ -313,6 +358,7 @@ def calculate_route(req: RouteRequest):
     overflown_coords = []
     overflown_names = []
     exclude_codes = set([req.origin.upper(), req.destination.upper()])
+    fuel_only = getattr(req, 'plan_fuel_stops', False)
     while i < len(route_points) - 1:
         lat1, lon1 = route_points[i]
         lat2, lon2 = route_points[i+1]
@@ -321,7 +367,7 @@ def calculate_route(req: RouteRequest):
             # Insert nearest airport to midpoint
             mid_lat = (lat1 + lat2) / 2
             mid_lon = (lon1 + lon2) / 2
-            nearest = find_nearest_airport(mid_lat, mid_lon, exclude_codes)
+            nearest = find_nearest_airport(mid_lat, mid_lon, exclude_codes, fuel_only=fuel_only)
             if nearest:
                 alat, alon, code, name = nearest
                 route_points.insert(i+1, (alat, alon))
@@ -332,6 +378,31 @@ def calculate_route(req: RouteRequest):
                 exclude_codes.add(code)
                 continue
         i += 1
+
+    # Fuel stop logic
+    if getattr(req, 'plan_fuel_stops', False) and req.aircraft_range_nm:
+        # Insert fuel stops so no segment exceeds aircraft_range_nm
+        i = 0
+        exclude_codes = set([req.origin.upper(), req.destination.upper()])
+        while i < len(route_points) - 1:
+            lat1, lon1 = route_points[i]
+            lat2, lon2 = route_points[i+1]
+            dist = haversine(lat1, lon1, lat2, lon2)
+            if dist > req.aircraft_range_nm:
+                # Insert nearest fuel airport to midpoint
+                mid_lat = (lat1 + lat2) / 2
+                mid_lon = (lon1 + lon2) / 2
+                nearest = find_nearest_airport(mid_lat, mid_lon, exclude_codes, fuel_only=True)
+                if nearest:
+                    alat, alon, code, name = nearest
+                    route_points.insert(i+1, (alat, alon))
+                    route_names.insert(i+1, code + " (FUEL)")
+                    overflown_airports.append(code)
+                    overflown_coords.append([alat, alon])
+                    overflown_names.append(name + " (FUEL)")
+                    exclude_codes.add(code)
+                    continue
+            i += 1
 
     # Build route segments with type and per-leg VFR altitude (async)
     legs = [(route_points[i], route_points[i+1]) for i in range(len(route_points) - 1)]
