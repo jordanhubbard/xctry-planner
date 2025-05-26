@@ -8,8 +8,18 @@ import requests
 import math
 import httpx
 from shapely.geometry import LineString, Point
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+# Add CORS middleware to allow frontend to access backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For dev, allow all. For prod, restrict to ["http://localhost:3000", "http://127.0.0.1:3000"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Load and cache the airports database
 AIRPORTS_CSV = os.path.join(os.path.dirname(__file__), 'airports.csv')
