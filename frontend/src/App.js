@@ -192,6 +192,7 @@ function App() {
   const [legLoading, setLegLoading] = useState(false);
   const [legTerrain, setLegTerrain] = useState([]); // [{maxElev, loading, error}]
   const [legTerrainLoading, setLegTerrainLoading] = useState(false);
+  const [routeLoading, setRouteLoading] = useState(false);
 
   useEffect(() => {
     fetch('http://localhost:8000/')
@@ -272,6 +273,7 @@ function App() {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    setRouteLoading(true);
     fetch('http://localhost:8000/route', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -285,9 +287,13 @@ function App() {
       .then((res) => res.json())
       .then((result) => {
         setRouteResult(result);
+        setRouteLoading(false);
         if (!result.error) fetchWeather();
       })
-      .catch(() => setRouteResult({ error: 'Could not calculate route' }));
+      .catch(() => {
+        setRouteResult({ error: 'Could not calculate route' });
+        setRouteLoading(false);
+      });
   };
 
   const fetchWeather = () => {
@@ -748,7 +754,13 @@ function App() {
             </div>
           </form>
         </div>
-        {/* Show error messages immediately below the form */}
+        {/* Show error messages and spinner immediately below the form */}
+        {routeLoading && (
+          <div style={{ textAlign: 'center', margin: '1em' }}>
+            <span className="spinner" style={{ display: 'inline-block', width: 40, height: 40, border: '5px solid #ccc', borderTop: '5px solid #2e7dff', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></span>
+            <div style={{ color: '#2e7dff', fontWeight: 600, marginTop: 8 }}>Calculating route...</div>
+          </div>
+        )}
         {(routeResult && routeResult.error) && (
           <div style={{ color: 'white', background: 'red', padding: 12, borderRadius: 8, margin: '1em auto', maxWidth: 700, fontWeight: 600, fontSize: 18, textAlign: 'center' }}>{routeResult.error}</div>
         )}
