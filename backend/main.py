@@ -36,9 +36,15 @@ airports_df = airports_df.set_index('_id', drop=False)
 # Build code lookup tables for ident, gps_code, local_code
 code_to_row = {}
 for _, row in airports_df.iterrows():
-    for code in [row.get('icaoCode'), row.get('gpsCode'), row.get('localCode'), row.get('id')]:
-        if code and isinstance(code, str):
-            code_to_row[code.upper()] = row
+    codes = []
+    for field in ['icaoCode', 'gpsCode', 'localCode', 'id']:
+        code = row.get(field)
+        if code is not None:
+            code_str = str(code).upper()
+            codes.append(code_str)
+            code_to_row[code_str] = row
+    if not codes:
+        print(f"[WARN] Airport missing all codes: {row.get('name', 'UNKNOWN')}")
 
 # Load OpenAIP airspaces
 AIRSPACES_JSON = os.path.join(os.path.dirname(__file__), 'airspaces_us.json')

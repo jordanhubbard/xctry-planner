@@ -3,4 +3,5 @@ uvicorn
 pandas
 geopandas
 requests
-httpx 
+httpx
+pytest 

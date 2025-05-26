@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build: ./backend
@@ -19,8 +17,9 @@ services:
     build: ./frontend
     ports:
       - "3000:3000"
-#    volumes:
-#      - ./frontend:/app
+    volumes:
+      - ./frontend:/app
     environment:
       - CHOKIDAR_USEPOLLING=true
+    command: sh -c "npm install && npm start"
     restart: unless-stopped
