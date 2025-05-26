@@ -13,6 +13,7 @@ import json
 from typing import List, Tuple, Dict
 import asyncio
 from functools import lru_cache
+import csv
 
 app = FastAPI()
 
@@ -25,26 +26,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load OpenAIP airports
-AIRPORTS_JSON = os.path.join(os.path.dirname(__file__), 'airports_us.json')
-with open(AIRPORTS_JSON, 'r') as f:
-    airports_data = json.load(f)
-# Build DataFrame for fast lookup
-airports_df = pd.DataFrame(airports_data)
-airports_df = airports_df.set_index('_id', drop=False)
+# Load airports.csv
+csv_airports = []
+with open(os.path.join(os.path.dirname(__file__), 'airports.csv')) as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        csv_airports.append(row)
 
-# Build code lookup tables for ident, gps_code, local_code
-code_to_row = {}
-for _, row in airports_df.iterrows():
-    codes = []
+# Load airports_us.json
+with open(os.path.join(os.path.dirname(__file__), 'airports_us.json')) as f:
+    json_airports = json.load(f)
+
+# Index JSON airports by all codes and by (lat, lon)
+json_code_index = {}
+json_latlon_index = {}
+for row in json_airports:
     for field in ['icaoCode', 'gpsCode', 'localCode', 'id']:
         code = row.get(field)
-        if code is not None:
-            code_str = str(code).upper()
-            codes.append(code_str)
-            code_to_row[code_str] = row
-    if not codes:
-        print(f"[WARN] Airport missing all codes: {row.get('name', 'UNKNOWN')}")
+        if code:
+            json_code_index[str(code).upper()] = row
+    # Index by rounded lat/lon
+    coords = row.get('geometry', {}).get('coordinates')
+    if coords and len(coords) == 2:
+        latlon = (round(float(coords[1]), 4), round(float(coords[0]), 4))
+        json_latlon_index[latlon] = row
+
+# Merge CSV and JSON
+merged_airports = []
+code_to_row = {}
+for csv_row in csv_airports:
+    codes = []
+    for field in ['ident', 'gps_code', 'local_code', 'icao_code']:
+        code = csv_row.get(field)
+        if code:
+            codes.append(code.upper())
+    # Try to find JSON match by code
+    json_row = None
+    for code in codes:
+        if code in json_code_index:
+            json_row = json_code_index[code]
+            break
+    # If not found, try by lat/lon
+    if not json_row:
+        try:
+            lat = round(float(csv_row['latitude_deg']), 4)
+            lon = round(float(csv_row['longitude_deg']), 4)
+            json_row = json_latlon_index.get((lat, lon))
+        except Exception:
+            pass
+    # Merge fields
+    merged = dict(csv_row)
+    if json_row:
+        merged['openaip'] = json_row
+    else:
+        print(f"[WARN] No OpenAIP metadata for {csv_row.get('name')} ({codes})")
+    merged_airports.append(merged)
+    for code in codes:
+        code_to_row[code] = merged
 
 # Load OpenAIP airspaces
 AIRSPACES_JSON = os.path.join(os.path.dirname(__file__), 'airspaces_us.json')

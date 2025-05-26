@@ -3,14 +3,14 @@
 
 # Build all containers
 build:
-	docker compose build
+	COMPOSE_BAKE=true docker compose build
 
 # Start all services in the background
 down:
 	docker compose down
 
-up run:
-	docker compose up -d
+up:
+	COMPOSE_BAKE=true docker compose up -d
 
 # Show logs for all services
 logs:
