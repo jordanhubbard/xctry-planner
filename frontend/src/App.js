@@ -3,8 +3,19 @@ import './App.css';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Polygon, useMapEvent, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
+import markerIcon from 'leaflet/dist/images/marker-icon.png';
+import markerShadow from 'leaflet/dist/images/marker-shadow.png';
 
-function WindBarbMarker({ lat, lon, wind_deg, wind_speed }) {
+// Fix Leaflet's default icon paths
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: markerIcon2x,
+  iconUrl: markerIcon,
+  shadowUrl: markerShadow,
+});
+
+function WindBarbMarker({ lat, lon, wind_deg, wind_speed, offset = [0, 0] }) {
   // Standard VFR wind barb SVG
   // wind_deg: direction wind is FROM (meteorological)
   // wind_speed: in knots
@@ -38,7 +49,7 @@ function WindBarbMarker({ lat, lon, wind_deg, wind_speed }) {
     barbs.push(<line key={pos} x1={barbX} y1={barbY} x2={barbX + barbLen * Math.cos(barbAngle) * 0.5} y2={barbY + barbLen * Math.sin(barbAngle) * 0.5} stroke="black" strokeWidth="2" />);
   }
   return (
-    <Marker position={[lat, lon]} icon={L.divIcon({
+    <Marker position={[lat + offset[0], lon + offset[1]]} icon={L.divIcon({
       className: '',
       html: `<svg width='32' height='32' style='transform: rotate(${wind_deg || 0}deg);'>
         <g>
@@ -289,29 +300,33 @@ function App() {
   const handleSubmit = (e) => {
     e.preventDefault();
     setRouteLoading(true);
+    const payload = {
+      origin: form.origin,
+      destination: form.destination,
+      speed: parseFloat(form.speed),
+      speed_unit: form.speedUnit,
+      altitude: parseInt(form.altitude, 10),
+      max_leg_distance: parseFloat(form.maxLegDistance),
+      avoid_airspaces: form.avoidAirspaces,
+      avoid_terrain: form.avoidTerrain,
+      plan_fuel_stops: form.planFuelStops,
+      aircraft_range_nm: form.planFuelStops ? parseFloat(form.aircraftRangeNm) : undefined
+    };
+    console.log('Submitting route planning request:', payload);
     fetch('http://localhost:8000/route', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        origin: form.origin,
-        destination: form.destination,
-        speed: parseFloat(form.speed),
-        speed_unit: form.speedUnit,
-        altitude: parseInt(form.altitude, 10),
-        max_leg_distance: parseFloat(form.maxLegDistance),
-        avoid_airspaces: form.avoidAirspaces,
-        avoid_terrain: form.avoidTerrain,
-        plan_fuel_stops: form.planFuelStops,
-        aircraft_range_nm: form.planFuelStops ? parseFloat(form.aircraftRangeNm) : undefined
-      }),
+      body: JSON.stringify(payload),
     })
       .then((res) => res.json())
       .then((result) => {
+        console.log('Received route planning response:', result);
         setRouteResult(result);
         setRouteLoading(false);
         if (!result.error) fetchWeather();
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error('Error during route planning:', err);
         setRouteResult({ error: 'Could not calculate route' });
         setRouteLoading(false);
       });
@@ -372,10 +387,48 @@ function App() {
   }
 
   let windBarbMarkers = [];
-  if (weather && weather.wind_points && Array.isArray(weather.wind_points)) {
-    windBarbMarkers = weather.wind_points.map((wp, i) => (
-      <WindBarbMarker key={i} lat={wp.lat} lon={wp.lon} wind_deg={wp.wind_deg} wind_speed={wp.wind_speed} />
-    ));
+  if (weather && weather.wind_points && Array.isArray(weather.wind_points) && routeResult && routeResult.origin_coords && routeResult.destination_coords) {
+    const points = [routeResult.origin_coords, ...(routeResult.overflown_coords || []), routeResult.destination_coords];
+    // Compute direction of route for each segment
+    windBarbMarkers = weather.wind_points.map((wp, i) => {
+      // Find the closest segment
+      let minDist = Infinity;
+      let segIdx = 0;
+      for (let j = 0; j < points.length - 1; j++) {
+        const [lat1, lon1] = points[j];
+        const [lat2, lon2] = points[j + 1];
+        // Project wp onto segment
+        const dx = lat2 - lat1;
+        const dy = lon2 - lon1;
+        const segLen2 = dx * dx + dy * dy;
+        let t = 0;
+        if (segLen2 > 0) {
+          t = ((wp.lat - lat1) * dx + (wp.lon - lon1) * dy) / segLen2;
+          t = Math.max(0, Math.min(1, t));
+        }
+        const projLat = lat1 + t * dx;
+        const projLon = lon1 + t * dy;
+        const dist2 = (wp.lat - projLat) ** 2 + (wp.lon - projLon) ** 2;
+        if (dist2 < minDist) {
+          minDist = dist2;
+          segIdx = j;
+        }
+      }
+      // Perpendicular offset (about 0.08 deg, ~5nm)
+      const [lat1, lon1] = points[segIdx];
+      const [lat2, lon2] = points[segIdx + 1];
+      const dx = lat2 - lat1;
+      const dy = lon2 - lon1;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      let offset = [0, 0];
+      if (len > 0) {
+        // Perpendicular vector (normalize and scale)
+        offset = [0.08 * (-(dy) / len), 0.08 * (dx / len)];
+      }
+      return (
+        <WindBarbMarker key={i} lat={wp.lat} lon={wp.lon} wind_deg={wp.wind_deg} wind_speed={wp.wind_speed} offset={offset} />
+      );
+    });
   }
 
   let airspacePolygons = [];

@@ -14,6 +14,7 @@ from typing import List, Tuple, Dict
 import asyncio
 from functools import lru_cache
 import csv
+from heapq import heappush, heappop
 
 app = FastAPI()
 
@@ -328,83 +329,93 @@ async def get_all_leg_vfr_altitudes(legs: List[Tuple[Tuple[float, float], Tuple[
         vfr_alts.append(vfr)
     return vfr_alts
 
+def closest_node(lat, lon, nodes):
+    min_dist = float('inf')
+    closest = None
+    for n in nodes:
+        d = haversine(lat, lon, n['lat'], n['lon'])
+        if d < min_dist:
+            min_dist = d
+            closest = n
+    return closest
+
 @app.post("/route")
 def calculate_route(req: RouteRequest):
+    print("[ROUTE REQUEST]", req.dict())
+    # Find closest graph nodes to origin and destination
     origin_info = get_airport_info(req.origin)
     dest_info = get_airport_info(req.destination)
     if 'error' in origin_info or 'error' in dest_info:
+        print("[ROUTE ERROR] Invalid origin or destination ICAO code")
         return {"error": "Invalid origin or destination ICAO code"}
-
-    speed = req.speed
-    if req.speed_unit == 'mph':
-        speed = speed * 0.868976
-
-    # Build initial direct route
-    route_points = [
-        (origin_info['lat'], origin_info['lon']),
-        (dest_info['lat'], dest_info['lon'])
-    ]
-    route_names = [req.origin.upper(), req.destination.upper()]
-
-    # Airspace avoidance (iterative)
-    if req.avoid_airspaces:
-        route_points = avoid_airspaces(route_points)
-        route_names = [req.origin.upper()] + ["DETOUR"] * (len(route_points) - 2) + [req.destination.upper()]
-
-    # Diversion logic: break up long legs with overflown airports
-    max_leg = req.max_leg_distance
-    i = 0
-    overflown_airports = []
-    overflown_coords = []
-    overflown_names = []
-    exclude_codes = set([req.origin.upper(), req.destination.upper()])
-    fuel_only = getattr(req, 'plan_fuel_stops', False)
-    while i < len(route_points) - 1:
-        lat1, lon1 = route_points[i]
-        lat2, lon2 = route_points[i+1]
-        dist = haversine(lat1, lon1, lat2, lon2)
-        if dist > max_leg:
-            # Insert nearest airport to midpoint
-            mid_lat = (lat1 + lat2) / 2
-            mid_lon = (lon1 + lon2) / 2
-            nearest = find_nearest_airport(mid_lat, mid_lon, exclude_codes, fuel_only=fuel_only)
-            if nearest:
-                alat, alon, code, name = nearest
-                route_points.insert(i+1, (alat, alon))
-                route_names.insert(i+1, code)
-                overflown_airports.append(code)
-                overflown_coords.append([alat, alon])
-                overflown_names.append(name)
-                exclude_codes.add(code)
+    origin_node = closest_node(origin_info['lat'], origin_info['lon'], nodes)
+    dest_node = closest_node(dest_info['lat'], dest_info['lon'], nodes)
+    print(f"[ROUTE] Closest node to origin: {origin_node['id']} ({origin_node['lat']},{origin_node['lon']})")
+    print(f"[ROUTE] Closest node to dest: {dest_node['id']} ({dest_node['lat']},{dest_node['lon']})")
+    # Dijkstra's algorithm
+    max_leg = req.max_leg_distance or 150.0
+    aircraft_range = req.aircraft_range_nm or 9999
+    avoid_airspaces = req.avoid_airspaces
+    avoid_terrain = req.avoid_terrain
+    visited = set()
+    heap = []
+    heappush(heap, (0, origin_node['id'], [origin_node['id']]))
+    prev = {}
+    found = False
+    best_path = None
+    best_dist = float('inf')
+    while heap:
+        cost, nid, path = heappop(heap)
+        if nid == dest_node['id']:
+            found = True
+            best_path = path
+            best_dist = cost
+            break
+        if (nid, tuple(path)) in visited:
+            continue
+        visited.add((nid, tuple(path)))
+        for edge in node_graph.get(nid, []):
+            if edge['to'] in path:
+                continue  # avoid cycles
+            if edge['distance'] > max_leg or edge['distance'] > aircraft_range:
                 continue
-        i += 1
-
-    # Fuel stop logic
-    if getattr(req, 'plan_fuel_stops', False) and req.aircraft_range_nm:
-        # Insert fuel stops so no segment exceeds aircraft_range_nm
-        i = 0
-        exclude_codes = set([req.origin.upper(), req.destination.upper()])
-        while i < len(route_points) - 1:
-            lat1, lon1 = route_points[i]
-            lat2, lon2 = route_points[i+1]
-            dist = haversine(lat1, lon1, lat2, lon2)
-            if dist > req.aircraft_range_nm:
-                # Insert nearest fuel airport to midpoint
-                mid_lat = (lat1 + lat2) / 2
-                mid_lon = (lon1 + lon2) / 2
-                nearest = find_nearest_airport(mid_lat, mid_lon, exclude_codes, fuel_only=True)
-                if nearest:
-                    alat, alon, code, name = nearest
-                    route_points.insert(i+1, (alat, alon))
-                    route_names.insert(i+1, code + " (FUEL)")
-                    overflown_airports.append(code)
-                    overflown_coords.append([alat, alon])
-                    overflown_names.append(name + " (FUEL)")
-                    exclude_codes.add(code)
-                    continue
-            i += 1
-
-    # Build route segments with type and per-leg VFR altitude (async)
+            # Airspace/terrain avoidance: penalize or skip edges that cross obstacles
+            n1 = next((n for n in nodes if n['id'] == nid), None)
+            n2 = next((n for n in nodes if n['id'] == edge['to']), None)
+            if not n1 or not n2:
+                continue
+            seg_penalty = 0
+            blocked = False
+            if avoid_airspaces:
+                seg = LineString([(n1['lon'], n1['lat']), (n2['lon'], n2['lat'])])
+                intersecting = airspaces_gdf[airspaces_gdf.intersects(seg)]
+                if not intersecting.empty:
+                    blocked = True
+            if avoid_terrain:
+                # Sample points along the segment and check elevation
+                samples = get_leg_sample_points(n1['lat'], n1['lon'], n2['lat'], n2['lon'])
+                for lat, lon in samples:
+                    # For speed, just check if elevation > req.altitude - 1000
+                    # (real code: use async elevation API)
+                    elev = 0  # TODO: use cached or fast elevation lookup
+                    if elev > req.altitude - 1000:
+                        blocked = True
+                        break
+            if blocked:
+                continue  # skip this edge
+            heappush(heap, (cost + edge['distance'] + seg_penalty, edge['to'], path + [edge['to']]))
+    # Build route from best_path
+    if found and best_path:
+        route_nodes = [next(n for n in nodes if n['id'] == nid) for nid in best_path]
+        route_points = [(n['lat'], n['lon']) for n in route_nodes]
+        route_names = [n['id'] for n in route_nodes]
+        print(f"[ROUTE] Graph route found: {route_names}")
+    else:
+        # Fallback: direct route
+        print("[ROUTE WARNING] No graph route found, using direct route.")
+        route_points = [(origin_info['lat'], origin_info['lon']), (dest_info['lat'], dest_info['lon'])]
+        route_names = [req.origin.upper(), req.destination.upper()]
+    # (Keep old code for VFR altitude, segments, etc.)
     legs = [(route_points[i], route_points[i+1]) for i in range(len(route_points) - 1)]
     vfr_alts = asyncio.run(get_all_leg_vfr_altitudes(legs))
     segments = []
@@ -420,22 +431,19 @@ def calculate_route(req: RouteRequest):
             'type': seg_type,
             'vfr_altitude': vfr_alt
         })
-
-    # Calculate total distance and time
     total_dist = 0
     for i in range(len(route_points) - 1):
         total_dist += haversine(route_points[i][0], route_points[i][1], route_points[i+1][0], route_points[i+1][1])
+    speed = req.speed
+    if req.speed_unit == 'mph':
+        speed = speed * 0.868976
     total_time = total_dist / speed if speed else 0
-
     return {
         "route": route_names,
         "distance_nm": round(total_dist, 1),
         "time_hr": round(total_time, 2),
-        "overflown_airports": overflown_airports,
         "origin_coords": [origin_info['lat'], origin_info['lon']],
         "destination_coords": [dest_info['lat'], dest_info['lon']],
-        "overflown_coords": overflown_coords,
-        "overflown_names": overflown_names,
         "segments": segments
     }
 
@@ -523,4 +531,85 @@ async def terrain_profile(request: Request):
             except Exception:
                 elev = None
             elevations.append({'lat': lat, 'lon': lon, 'elevation': elev})
-    return elevations 
+    return elevations
+
+# Load waypoints.csv
+waypoints = []
+waypoints_path = os.path.join(os.path.dirname(__file__), 'waypoints.csv')
+if os.path.exists(waypoints_path):
+    with open(waypoints_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            waypoints.append(row)
+else:
+    print('[WARN] waypoints.csv not found; only airports will be used as nodes.')
+
+# Extract airports, navaids, intersections, waypoints from airports_us.json
+nodes = []
+num_airports = 0
+num_navaids = 0
+num_intersections = 0
+num_waypoints = 0
+for row in json_airports:
+    # Airports
+    if row.get('type', '').lower() == 'airport' or row.get('icaoCode') or row.get('gpsCode'):
+        try:
+            coords = row.get('geometry', {}).get('coordinates')
+            if coords and len(coords) == 2:
+                lat, lon = coords[1], coords[0]
+                nodes.append({'id': row.get('icaoCode') or row.get('gpsCode') or row.get('localCode') or row.get('id'),
+                              'name': row.get('name', ''), 'lat': lat, 'lon': lon, 'type': 'airport'})
+                num_airports += 1
+        except Exception:
+            continue
+    # Navaids
+    elif row.get('type', '').lower() in ['navaid', 'vor', 'ndb', 'dme']:
+        try:
+            coords = row.get('geometry', {}).get('coordinates')
+            if coords and len(coords) == 2:
+                lat, lon = coords[1], coords[0]
+                nodes.append({'id': row.get('id'), 'name': row.get('name', ''), 'lat': lat, 'lon': lon, 'type': row.get('type', '').lower()})
+                num_navaids += 1
+        except Exception:
+            continue
+    # Intersections/Waypoints
+    elif row.get('type', '').lower() in ['intersection', 'waypoint', 'reportingpoint']:
+        try:
+            coords = row.get('geometry', {}).get('coordinates')
+            if coords and len(coords) == 2:
+                lat, lon = coords[1], coords[0]
+                nodes.append({'id': row.get('id'), 'name': row.get('name', ''), 'lat': lat, 'lon': lon, 'type': row.get('type', '').lower()})
+                if row.get('type', '').lower() == 'intersection':
+                    num_intersections += 1
+                else:
+                    num_waypoints += 1
+        except Exception:
+            continue
+
+# Build adjacency list graph: connect nodes within 200nm
+GRAPH_MAX_DIST_NM = 200
+node_graph = {n['id']: [] for n in nodes}
+for i, n1 in enumerate(nodes):
+    for j, n2 in enumerate(nodes):
+        if i == j:
+            continue
+        dist = haversine(n1['lat'], n1['lon'], n2['lat'], n2['lon'])
+        if dist <= GRAPH_MAX_DIST_NM:
+            node_graph[n1['id']].append({'to': n2['id'], 'distance': dist})
+
+print(f'[GRAPH] Loaded {len(nodes)} nodes: {num_airports} airports, {num_navaids} navaids, {num_intersections} intersections, {num_waypoints} waypoints')
+
+# Function to generate a detour point just outside an obstacle (airspace or terrain)
+def generate_detour_point(lat1, lon1, lat2, lon2, obstacle_shape, buffer_nm=5.0):
+    # Find midpoint of segment
+    mid_lat = (lat1 + lat2) / 2
+    mid_lon = (lon1 + lon2) / 2
+    # Find closest point on obstacle boundary to midpoint
+    from shapely.geometry import Point
+    mid_point = Point(mid_lon, mid_lat)
+    boundary = obstacle_shape.boundary
+    closest = boundary.interpolate(boundary.project(mid_point))
+    # Offset detour by buffer_nm (approx 0.0167 deg per nm)
+    offset_lat = closest.y + buffer_nm * 0.0167
+    offset_lon = closest.x + buffer_nm * 0.0167
+    return (offset_lat, offset_lon) 
