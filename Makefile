@@ -31,8 +31,8 @@ test: test-backend test-frontend
 
 # Remove all containers, images, and volumes (full cleanup)
 clean:
-	docker compose down -v --rmi all --remove-orphans
-	rm -rf backend/__pycache__
+	@docker compose down -v --rmi all --remove-orphans
+	@rm -rf backend/__pycache__
 
 # Clean and rebuild everything
 rebuild: clean build

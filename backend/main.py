@@ -203,7 +203,7 @@ def is_likely_fuel_airport(row):
     if not has_paved:
         return False
     # CSV: scheduled_service == 'yes' is a good proxy for fuel
-    if row.get('scheduled_service', '').lower() == 'yes':
+    if str(row.get('scheduled_service', '')).lower() == 'yes':
         return True
     # Otherwise, not sure
     return False
@@ -342,7 +342,6 @@ def closest_node(lat, lon, nodes):
 @app.post("/route")
 def calculate_route(req: RouteRequest):
     print("[ROUTE REQUEST]", req.dict())
-    # Find closest graph nodes to origin and destination
     origin_info = get_airport_info(req.origin)
     dest_info = get_airport_info(req.destination)
     if 'error' in origin_info or 'error' in dest_info:
@@ -352,7 +351,6 @@ def calculate_route(req: RouteRequest):
     dest_node = closest_node(dest_info['lat'], dest_info['lon'], nodes)
     print(f"[ROUTE] Closest node to origin: {origin_node['id']} ({origin_node['lat']},{origin_node['lon']})")
     print(f"[ROUTE] Closest node to dest: {dest_node['id']} ({dest_node['lat']},{dest_node['lon']})")
-    # Dijkstra's algorithm
     max_leg = req.max_leg_distance or 150.0
     aircraft_range = req.aircraft_range_nm or 9999
     avoid_airspaces = req.avoid_airspaces
@@ -360,29 +358,32 @@ def calculate_route(req: RouteRequest):
     visited = set()
     heap = []
     heappush(heap, (0, origin_node['id'], [origin_node['id']]))
-    prev = {}
     found = False
     best_path = None
     best_dist = float('inf')
     while heap:
         cost, nid, path = heappop(heap)
+        print(f"[DIJKSTRA] Visiting node {nid}, cost so far: {cost}, path: {path}")
         if nid == dest_node['id']:
             found = True
             best_path = path
             best_dist = cost
+            print(f"[DIJKSTRA] Destination {nid} reached, total cost: {cost}")
             break
         if (nid, tuple(path)) in visited:
             continue
         visited.add((nid, tuple(path)))
         for edge in node_graph.get(nid, []):
             if edge['to'] in path:
-                continue  # avoid cycles
-            if edge['distance'] > max_leg or edge['distance'] > aircraft_range:
+                print(f"[DIJKSTRA] Skipping edge to {edge['to']} (cycle)")
                 continue
-            # Airspace/terrain avoidance: penalize or skip edges that cross obstacles
+            if edge['distance'] > max_leg or edge['distance'] > aircraft_range:
+                print(f"[DIJKSTRA] Skipping edge to {edge['to']} (distance {edge['distance']:.1f}nm exceeds max_leg/aircraft_range)")
+                continue
             n1 = next((n for n in nodes if n['id'] == nid), None)
             n2 = next((n for n in nodes if n['id'] == edge['to']), None)
             if not n1 or not n2:
+                print(f"[DIJKSTRA] Skipping edge to {edge['to']} (node not found)")
                 continue
             seg_penalty = 0
             blocked = False
@@ -390,28 +391,26 @@ def calculate_route(req: RouteRequest):
                 seg = LineString([(n1['lon'], n1['lat']), (n2['lon'], n2['lat'])])
                 intersecting = airspaces_gdf[airspaces_gdf.intersects(seg)]
                 if not intersecting.empty:
+                    print(f"[DIJKSTRA] Skipping edge to {edge['to']} (blocked by airspace)")
                     blocked = True
             if avoid_terrain:
-                # Sample points along the segment and check elevation
                 samples = get_leg_sample_points(n1['lat'], n1['lon'], n2['lat'], n2['lon'])
                 for lat, lon in samples:
-                    # For speed, just check if elevation > req.altitude - 1000
-                    # (real code: use async elevation API)
                     elev = 0  # TODO: use cached or fast elevation lookup
                     if elev > req.altitude - 1000:
+                        print(f"[DIJKSTRA] Skipping edge to {edge['to']} (blocked by terrain at {lat},{lon})")
                         blocked = True
                         break
             if blocked:
-                continue  # skip this edge
+                continue
+            print(f"[DIJKSTRA] Adding edge to {edge['to']} (distance {edge['distance']:.1f}nm)")
             heappush(heap, (cost + edge['distance'] + seg_penalty, edge['to'], path + [edge['to']]))
-    # Build route from best_path
     if found and best_path:
+        print(f"[ROUTE] Graph route found: {best_path}, total distance: {best_dist:.1f}nm")
         route_nodes = [next(n for n in nodes if n['id'] == nid) for nid in best_path]
         route_points = [(n['lat'], n['lon']) for n in route_nodes]
         route_names = [n['id'] for n in route_nodes]
-        print(f"[ROUTE] Graph route found: {route_names}")
     else:
-        # Fallback: direct route
         print("[ROUTE WARNING] No graph route found, using direct route.")
         route_points = [(origin_info['lat'], origin_info['lon']), (dest_info['lat'], dest_info['lon'])]
         route_names = [req.origin.upper(), req.destination.upper()]
@@ -551,8 +550,9 @@ num_navaids = 0
 num_intersections = 0
 num_waypoints = 0
 for row in json_airports:
+    type_str = str(row.get('type', '')).lower()
     # Airports
-    if row.get('type', '').lower() == 'airport' or row.get('icaoCode') or row.get('gpsCode'):
+    if type_str == 'airport' or row.get('icaoCode') or row.get('gpsCode'):
         try:
             coords = row.get('geometry', {}).get('coordinates')
             if coords and len(coords) == 2:
@@ -563,23 +563,23 @@ for row in json_airports:
         except Exception:
             continue
     # Navaids
-    elif row.get('type', '').lower() in ['navaid', 'vor', 'ndb', 'dme']:
+    elif type_str in ['navaid', 'vor', 'ndb', 'dme']:
         try:
             coords = row.get('geometry', {}).get('coordinates')
             if coords and len(coords) == 2:
                 lat, lon = coords[1], coords[0]
-                nodes.append({'id': row.get('id'), 'name': row.get('name', ''), 'lat': lat, 'lon': lon, 'type': row.get('type', '').lower()})
+                nodes.append({'id': row.get('id'), 'name': row.get('name', ''), 'lat': lat, 'lon': lon, 'type': type_str})
                 num_navaids += 1
         except Exception:
             continue
     # Intersections/Waypoints
-    elif row.get('type', '').lower() in ['intersection', 'waypoint', 'reportingpoint']:
+    elif type_str in ['intersection', 'waypoint', 'reportingpoint']:
         try:
             coords = row.get('geometry', {}).get('coordinates')
             if coords and len(coords) == 2:
                 lat, lon = coords[1], coords[0]
-                nodes.append({'id': row.get('id'), 'name': row.get('name', ''), 'lat': lat, 'lon': lon, 'type': row.get('type', '').lower()})
-                if row.get('type', '').lower() == 'intersection':
+                nodes.append({'id': row.get('id'), 'name': row.get('name', ''), 'lat': lat, 'lon': lon, 'type': type_str})
+                if type_str == 'intersection':
                     num_intersections += 1
                 else:
                     num_waypoints += 1

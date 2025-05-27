@@ -312,7 +312,7 @@ function App() {
       plan_fuel_stops: form.planFuelStops,
       aircraft_range_nm: form.planFuelStops ? parseFloat(form.aircraftRangeNm) : undefined
     };
-    console.log('Submitting route planning request:', payload);
+    console.log('[FRONTEND] Submitting route planning request:', payload);
     fetch('http://localhost:8000/route', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -320,13 +320,16 @@ function App() {
     })
       .then((res) => res.json())
       .then((result) => {
-        console.log('Received route planning response:', result);
+        console.log('[FRONTEND] Received route planning response:', result);
+        if (result.route) {
+          console.log('[FRONTEND] Route node sequence:', result.route);
+        }
         setRouteResult(result);
         setRouteLoading(false);
         if (!result.error) fetchWeather();
       })
       .catch((err) => {
-        console.error('Error during route planning:', err);
+        console.error('[FRONTEND] Error during route planning:', err);
         setRouteResult({ error: 'Could not calculate route' });
         setRouteLoading(false);
       });
