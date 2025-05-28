@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import pandas as pd
@@ -15,8 +15,15 @@ import asyncio
 from functools import lru_cache
 import csv
 from heapq import heappush, heappop
+from fastapi.exception_handlers import RequestValidationError
+from fastapi.exceptions import RequestValidationError as FastAPIRequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+import logging
 
 app = FastAPI()
+
+# Set up logging
+logger = logging.getLogger("uvicorn.error")
 
 # Add CORS middleware to allow frontend to access backend
 app.add_middleware(
@@ -123,7 +130,7 @@ def get_airport_info(icao):
             if coords and len(coords) == 2:
                 lon, lat = coords
             else:
-                return {"error": f"Missing coordinates for {icao}"}
+                raise HTTPException(status_code=404, detail=f"Missing coordinates for {icao}")
         # Prefer CSV elevation if present, else use OpenAIP
         try:
             elevation = float(row.get('elevation_ft', 0))
@@ -136,7 +143,7 @@ def get_airport_info(icao):
             "lon": lon,
             "elevation": elevation
         }
-    return {"error": f"Airport {icao} not found"}
+    raise HTTPException(status_code=404, detail=f"Airport {icao} not found")
 
 @app.get("/")
 def read_root():
@@ -342,11 +349,12 @@ def closest_node(lat, lon, nodes):
 @app.post("/route")
 def calculate_route(req: RouteRequest):
     print("[ROUTE REQUEST]", req.dict())
-    origin_info = get_airport_info(req.origin)
-    dest_info = get_airport_info(req.destination)
-    if 'error' in origin_info or 'error' in dest_info:
-        print("[ROUTE ERROR] Invalid origin or destination ICAO code")
-        return {"error": "Invalid origin or destination ICAO code"}
+    try:
+        origin_info = get_airport_info(req.origin)
+        dest_info = get_airport_info(req.destination)
+    except HTTPException as exc:
+        logger.error(f"[ROUTE ERROR] {exc.detail}")
+        raise HTTPException(status_code=400, detail="Invalid origin or destination ICAO code.")
     origin_node = closest_node(origin_info['lat'], origin_info['lon'], nodes)
     dest_node = closest_node(dest_info['lat'], dest_info['lon'], nodes)
     print(f"[ROUTE] Closest node to origin: {origin_node['id']} ({origin_node['lat']},{origin_node['lon']})")
@@ -411,7 +419,7 @@ def calculate_route(req: RouteRequest):
         route_points = [(n['lat'], n['lon']) for n in route_nodes]
         route_names = [n['id'] for n in route_nodes]
     else:
-        print("[ROUTE WARNING] No graph route found, using direct route.")
+        logger.warning("[ROUTE WARNING] No graph route found, using direct route.")
         route_points = [(origin_info['lat'], origin_info['lon']), (dest_info['lat'], dest_info['lon'])]
         route_names = [req.origin.upper(), req.destination.upper()]
     # (Keep old code for VFR altitude, segments, etc.)
@@ -458,17 +466,20 @@ def haversine(lat1, lon1, lat2, lon2):
 
 @app.get("/weather")
 def get_weather(origin: str, destination: str):
-    origin_info = get_airport_info(origin)
-    dest_info = get_airport_info(destination)
-    if 'error' in origin_info or 'error' in dest_info:
-        return {"error": "Invalid origin or destination ICAO code"}
+    try:
+        origin_info = get_airport_info(origin)
+        dest_info = get_airport_info(destination)
+    except HTTPException as exc:
+        logger.error(f"[WEATHER ERROR] {exc.detail}")
+        raise HTTPException(status_code=400, detail="Invalid origin or destination ICAO code.")
     if not OPENWEATHERMAP_API_KEY:
-        return {"error": "OpenWeatherMap API key not set"}
+        raise HTTPException(status_code=503, detail="OpenWeatherMap API key not set.")
     def fetch_weather(lat, lon):
         url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}&units=metric"
         resp = requests.get(url)
         if resp.status_code == 200:
             return resp.json()
+        logger.error(f"[WEATHER ERROR] Failed to fetch weather for {lat},{lon}")
         return {"error": f"Failed to fetch weather for {lat},{lon}"}
     origin_weather = fetch_weather(origin_info['lat'], origin_info['lon'])
     dest_weather = fetch_weather(dest_info['lat'], dest_info['lon'])
@@ -612,4 +623,45 @@ def generate_detour_point(lat1, lon1, lat2, lon2, obstacle_shape, buffer_nm=5.0)
     # Offset detour by buffer_nm (approx 0.0167 deg per nm)
     offset_lat = closest.y + buffer_nm * 0.0167
     offset_lon = closest.x + buffer_nm * 0.0167
-    return (offset_lat, offset_lon) 
+    return (offset_lat, offset_lon)
+
+# --- GLOBAL ERROR HANDLER ---
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.error(f"HTTPException: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "type": exc.__class__.__name__,
+                "message": exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            }
+        },
+    )
+
+@app.exception_handler(FastAPIRequestValidationError)
+async def validation_exception_handler(request: Request, exc: FastAPIRequestValidationError):
+    logger.error(f"Validation error: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "type": "ValidationError",
+                "message": "Invalid request parameters.",
+                "details": exc.errors()
+            }
+        },
+    )
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "type": "InternalServerError",
+                "message": "An unexpected error occurred. Please try again later."
+            }
+        },
+    ) 

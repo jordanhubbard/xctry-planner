@@ -318,15 +318,24 @@ function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-      .then((res) => res.json())
-      .then((result) => {
-        console.log('[FRONTEND] Received route planning response:', result);
-        if (result.route) {
-          console.log('[FRONTEND] Route node sequence:', result.route);
+      .then(async (res) => {
+        let result;
+        try {
+          result = await res.json();
+        } catch {
+          result = { error: { message: 'Invalid response from backend.' } };
         }
-        setRouteResult(result);
+        if (result.error) {
+          // Support both old and new error formats
+          let errorMsg = typeof result.error === 'string' ? result.error : result.error.message || 'Unknown error';
+          let errorType = result.error.type || '';
+          let errorDetails = result.error.details || null;
+          setRouteResult({ error: errorMsg, errorType, errorDetails });
+        } else {
+          setRouteResult(result);
+          if (!result.error) fetchWeather();
+        }
         setRouteLoading(false);
-        if (!result.error) fetchWeather();
       })
       .catch((err) => {
         console.error('[FRONTEND] Error during route planning:', err);
@@ -339,9 +348,21 @@ function App() {
     if (!form.origin || !form.destination) return;
     setWeatherLoading(true);
     fetch(`http://localhost:8000/weather?origin=${form.origin}&destination=${form.destination}`)
-      .then((res) => res.json())
-      .then((data) => {
-        setWeather(data);
+      .then(async (res) => {
+        let data;
+        try {
+          data = await res.json();
+        } catch {
+          data = { error: { message: 'Invalid response from backend.' } };
+        }
+        if (data.error) {
+          let errorMsg = typeof data.error === 'string' ? data.error : data.error.message || 'Unknown error';
+          let errorType = data.error.type || '';
+          let errorDetails = data.error.details || null;
+          setWeather({ error: errorMsg, errorType, errorDetails });
+        } else {
+          setWeather(data);
+        }
         setWeatherLoading(false);
       })
       .catch(() => {
@@ -892,10 +913,30 @@ function App() {
           </div>
         )}
         {(routeResult && routeResult.error) && (
-          <div style={{ color: 'white', background: 'red', padding: 12, borderRadius: 8, margin: '1em auto', maxWidth: 700, fontWeight: 600, fontSize: 18, textAlign: 'center' }}>{routeResult.error}</div>
+          <div style={{ color: 'white', background: 'red', padding: 12, borderRadius: 8, margin: '1em auto', maxWidth: 700, fontWeight: 600, fontSize: 18, textAlign: 'center' }}>
+            {routeResult.error}
+            {routeResult.errorType && <span style={{ fontWeight: 400, fontSize: 14, marginLeft: 8 }}>({routeResult.errorType})</span>}
+            {routeResult.errorDetails && Array.isArray(routeResult.errorDetails) && (
+              <ul style={{ color: 'white', fontSize: 14, marginTop: 8, textAlign: 'left' }}>
+                {routeResult.errorDetails.map((err, i) => (
+                  <li key={i}>{err.msg} {err.loc ? `at ${err.loc.join('.')}` : ''}</li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
         {(weather && weather.error) && (
-          <div style={{ color: 'white', background: 'red', padding: 12, borderRadius: 8, margin: '1em auto', maxWidth: 700, fontWeight: 600, fontSize: 18, textAlign: 'center' }}>{weather.error}</div>
+          <div style={{ color: 'white', background: 'red', padding: 12, borderRadius: 8, margin: '1em auto', maxWidth: 700, fontWeight: 600, fontSize: 18, textAlign: 'center' }}>
+            {weather.error}
+            {weather.errorType && <span style={{ fontWeight: 400, fontSize: 14, marginLeft: 8 }}>({weather.errorType})</span>}
+            {weather.errorDetails && Array.isArray(weather.errorDetails) && (
+              <ul style={{ color: 'white', fontSize: 14, marginTop: 8, textAlign: 'left' }}>
+                {weather.errorDetails.map((err, i) => (
+                  <li key={i}>{err.msg} {err.loc ? `at ${err.loc.join('.')}` : ''}</li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
         {/* Move the map up, right after the form/buttons */}
         <div style={{ width: '80vw', height: '60vh', margin: '2em auto 1em auto', borderRadius: 8, overflow: 'hidden', position: 'relative' }}>
